@@ -18,8 +18,10 @@ Upstream promises breaking changes.
 
 ## Decision
 
-Pin `@deepseek-ai/dsh@0.1.3-alpha.1` (upstream commit
-`d347e703908d0406b7a7ef80e3a0e594d86b2215`). All integration code is in
+Pin `@deepseek-ai/dsh` at upstream commit
+`d347e703908d0406b7a7ef80e3a0e594d86b2215` (which declares `0.1.3-alpha.1`). The
+**installable** pin is `0.1.2-rc.1` because `0.1.3-alpha.1` is not published to
+npm; see [ADR-0021](0021-dsh-version-pin.md). All integration code is in
 `packages/dsh-yardmaster/` (the Cordis plugin) and
 `packages/dsh-bundle-yardmaster/` (the bundle + `cordis.patch.yml` + the
 `yardmaster-web` / `yardmaster-headless` profile templates). `COMPATIBILITY.md`

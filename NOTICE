@@ -33,8 +33,9 @@ This project uses DeepSeek Harness (dsh) as an unmodified, MIT-licensed
 dependency. It is neither vendored nor forked.
   Copyright (c) 2026 DeepSeek
   Upstream:       https://github.com/deepseek-ai/deepseek-harness
-  Pinned commit:  d347e703908d0406b7a7ef80e3a0e594d86b2215
-  Pinned version: @deepseek-ai/dsh@0.1.3-alpha.1
+  Pinned commit:  d347e703908d0406b7a7ef80e3a0e594d86b2215 (declares 0.1.3-alpha.1)
+  Installable pin: @deepseek-ai/dsh@0.1.2-rc.1 (npm "latest"; 0.1.3-alpha.1 is
+  not published). See docs/decisions/0021-dsh-version-pin.md.
   The MIT license text for DeepSeek Harness is reproduced in
   THIRD_PARTY_NOTICES.md.
 

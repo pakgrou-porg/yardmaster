@@ -1,0 +1,40 @@
+{
+  "name": "@pakgrou-porg/dsh-yardmaster",
+  "version": "0.1.0",
+  "description": "DeepSeek Harness (Cordis) plugin: makes the Yardmaster data plane the harness's model adapter, maps harness planning/execution onto Yardmaster tiers, and correlates every harness step with a Yardmaster metrics event.",
+  "license": "Apache-2.0",
+  "author": "Karl Miller",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pakgrou-porg/yardmaster",
+    "directory": "packages/dsh-yardmaster"
+  },
+  "keywords": ["dsh-plugin", "cordis", "yardmaster", "llm-router"],
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    }
+  },
+  "files": ["lib", "README.md", "COMPATIBILITY.md"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:latest": "vitest run"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh": ">=0.1.2-rc.1 <0.2.0"
+  },
+  "devDependencies": {
+    "@deepseek-ai/dsh": "0.1.2-rc.1",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

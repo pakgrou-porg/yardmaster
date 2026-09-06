@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Karl Miller
+# SPDX-License-Identifier: Apache-2.0
+#
+# The dsh-bundle-yardmaster patch layer. Applied after dsh-base and the mode
+# bundle (dsh-web-app or dsh-headless), before the profile's own
+# cordis.patch.yml and any --patch overlays.
+#
+# It does exactly two things and disables nothing else (spec 1.10):
+#   1. Mounts the dsh-yardmaster plugin.
+#   2. Points the default model adapter at the yardmaster adapter and the
+#      plan-execute route.
+#
+# Row ids targeted here exist in `dsh --profile web --dump-config` /
+# `--profile headless --dump-config` for the pinned dsh version; see
+# dsh-web-config.reference.yml in this directory. A patch replaces the targeted
+# row's whole `config`, so the row below restates every key it owns.
+
+- insert:
+    - id: yardmaster
+      name: '@pakgrou-porg/dsh-yardmaster'
+
+- id: agent-default-model
+  config:
+    provider: yardmaster
+    model: plan-execute

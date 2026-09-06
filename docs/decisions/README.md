@@ -32,3 +32,4 @@ and that every row points at a file that exists.
 | [0018](0018-telemetry-auth-default-plain.md) | Node telemetry stays plaintext by default (telemetry_auth = "plain") | accepted |
 | [0019](0019-pair-default-placement-equivalence.md) | placement.policy = "pair_default" is byte-for-byte PAIR scheduler ordering | accepted |
 | [0020](0020-repo-owner-and-visibility.md) | Repository is public under pakgrou-porg | accepted |
+| [0021](0021-dsh-version-pin.md) | dsh version pin: installable 0.1.2-rc.1, upstream SHA declares 0.1.3-alpha.1 | accepted |

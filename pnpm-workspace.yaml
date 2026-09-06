@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Karl Miller
+# SPDX-License-Identifier: Apache-2.0
+#
+# The DeepSeek Harness integration lives in packages/. The vendored PAIR desktop
+# tree (desktop/) keeps its own npm project and is listed so a single
+# `pnpm install` at the root can drive both when needed; desktop/ is normally
+# built with its own `npm` per PAIR's AGENTS.md.
+packages:
+  - "packages/*"
+  - "desktop"

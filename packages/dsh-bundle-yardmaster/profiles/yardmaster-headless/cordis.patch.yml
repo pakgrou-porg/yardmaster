@@ -1,0 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Karl Miller
+# SPDX-License-Identifier: Apache-2.0
+#
+# Profile-local patch layer for yardmaster-headless. Empty on purpose (see the
+# web profile note). Disable with [] rather than deleting.
+[]

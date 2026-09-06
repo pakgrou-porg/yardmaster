@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Karl Miller
+# SPDX-License-Identifier: Apache-2.0
+#
+# Profile-local patch layer for yardmaster-web. Empty on purpose: the bundle
+# (dsh-bundle-yardmaster/cordis.patch.yml) already mounts the plugin and sets the
+# default model adapter. Disable this layer with [] rather than deleting it.
+[]

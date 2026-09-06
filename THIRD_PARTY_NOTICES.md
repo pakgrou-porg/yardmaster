@@ -16388,7 +16388,9 @@ or by reading the LICENSE file inside the corresponding installed distribution.
 
 Upstream: https://github.com/deepseek-ai/deepseek-harness
 Pinned commit: d347e703908d0406b7a7ef80e3a0e594d86b2215
-Pinned npm version: `@deepseek-ai/dsh@0.1.3-alpha.1`
+Pinned commit declares `0.1.3-alpha.1`; installable pin is
+`@deepseek-ai/dsh@0.1.2-rc.1` (npm `latest`; `0.1.3-alpha.1` is unpublished).
+See `docs/decisions/0021-dsh-version-pin.md`.
 Used as an unmodified npm dependency. Neither vendored nor forked.
 
 <!-- BEGIN VERBATIM: dsh/LICENSE -->
