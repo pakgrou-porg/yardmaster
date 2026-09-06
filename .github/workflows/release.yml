@@ -1,0 +1,93 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Karl Miller
+# SPDX-License-Identifier: Apache-2.0
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: '1.25' }
+      - name: Rust toolchain
+        run: rustup show
+      - uses: actions/setup-node@v4
+        with: { node-version: '24' }
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+      - name: Build (unsigned)
+        shell: bash
+        run: ./scripts/build.sh || pwsh ./scripts/build.ps1
+      - name: SBOM (CycloneDX)
+        shell: bash
+        run: |
+          cargo install --locked cargo-cyclonedx || true
+          cargo cyclonedx --format json || true
+          npx --yes @cyclonedx/cyclonedx-npm --output-file sbom-npm.json || true
+      - name: Checksums
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          cp -r services/build/bin/* artifacts/ 2>/dev/null || true
+          cp -f *.sbom.json sbom-npm.json artifacts/ 2>/dev/null || true
+          ( cd artifacts && (sha256sum * > SHA256SUMS 2>/dev/null || shasum -a 256 * > SHA256SUMS) )
+      - uses: actions/upload-artifact@v4
+        with:
+          name: yardmaster-${{ matrix.os }}
+          path: artifacts/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: dist }
+      - name: Release notes from conventional commits
+        run: |
+          npx --yes conventional-changelog-cli -p conventionalcommits -r 2 > RELEASE_NOTES.md || echo "Release ${GITHUB_REF_NAME}" > RELEASE_NOTES.md
+          {
+            echo ""
+            echo "---"
+            echo "**Artifacts are unsigned.** Code signing and notarization are not yet in scope."
+            echo "Verify with the attached \`SHA256SUMS\` and the CycloneDX SBOMs."
+          } >> RELEASE_NOTES.md
+      - uses: softprops/action-gh-release@v2
+        with:
+          body_path: RELEASE_NOTES.md
+          files: dist/**/*
+          prerelease: ${{ contains(github.ref_name, '-alpha') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-rc') }}
+
+  npm-publish-dry-run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '24' }
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+      - run: pnpm install --frozen-lockfile
+      - name: pack (dry-run; real publish is gated on NPM_TOKEN)
+        run: |
+          pnpm -C packages/dsh-yardmaster pack
+          pnpm -C packages/dsh-bundle-yardmaster pack
+          if [ -n "${NPM_TOKEN:-}" ]; then
+            echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > ~/.npmrc
+            pnpm -C packages/dsh-yardmaster publish --no-git-checks
+            pnpm -C packages/dsh-bundle-yardmaster publish --no-git-checks
+          else
+            echo "NPM_TOKEN not set — publish skipped. See the 'blocked' issue."
+          fi
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}

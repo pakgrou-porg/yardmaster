@@ -1,0 +1,32 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Karl Miller
+# SPDX-License-Identifier: Apache-2.0
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 10
+
+  - package-ecosystem: gomod
+    directory: "/services/yardmaster-lan-scanner"
+    schedule: { interval: weekly }
+
+  - package-ecosystem: npm
+    directory: "/packages/dsh-yardmaster"
+    schedule: { interval: weekly }
+    # The compatibility job (harness-latest) decides whether a dsh bump merges.
+    allow:
+      - dependency-type: all
+
+  - package-ecosystem: npm
+    directory: "/packages/dsh-bundle-yardmaster"
+    schedule: { interval: weekly }
+
+  - package-ecosystem: npm
+    directory: "/desktop"
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 10
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule: { interval: weekly }

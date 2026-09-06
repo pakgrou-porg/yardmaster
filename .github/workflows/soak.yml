@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Karl Miller
+# SPDX-License-Identifier: Apache-2.0
+name: soak
+
+on:
+  schedule:
+    - cron: "0 6 * * *"   # nightly, not on PR (spec section 6)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  soak:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: 10-minute two-node soak, 20 concurrent streams
+        run: |
+          if [ -f tests/soak/docker-compose.yml ]; then
+            docker compose -f tests/soak/docker-compose.yml up --build --abort-on-container-exit --exit-code-from soak
+          else
+            echo "tests/soak/docker-compose.yml not present yet — see the 'blocked' issue for the soak harness."
+            echo "Acceptance: no leaked connections, no unbounded memory growth, p99 routing overhead < 5 ms excluding judge calls."
+            exit 1
+          fi

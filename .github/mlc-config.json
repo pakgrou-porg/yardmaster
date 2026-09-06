@@ -1,0 +1,9 @@
+{
+  "//": "SPDX-License-Identifier: Apache-2.0  Copyright (c) 2026 Karl Miller",
+  "ignorePatterns": [
+    { "pattern": "^https://github.com/pakgrou-porg/yardmaster/(issues|discussions|security|releases)" },
+    { "pattern": "^http://(localhost|127\\.0\\.0\\.1)" },
+    { "pattern": "^https://(openrouter\\.ai|api\\.venice\\.ai|api\\.kie\\.ai)" }
+  ],
+  "aliveStatusCodes": [200, 206, 429]
+}
