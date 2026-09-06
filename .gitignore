@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Karl Miller
+# SPDX-License-Identifier: Apache-2.0
+
+# Rust
+/target/
+**/target/
+*.rs.bk
+
+# Go
+/services/build/bin/
+*.test
+*.out
+
+# Node / pnpm
+node_modules/
+.pnpm-store/
+dist/
+out/
+*.tsbuildinfo
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Local config and secrets — never commit
+yardmaster.toml
+*.local.toml
+.env
+.env.*
+secrets/
+
+# Build / release artifacts
+/artifacts/
+*.sbom.json
+*.tgz
+
+# Test scratch
+/.scratch/

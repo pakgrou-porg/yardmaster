@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Karl Miller
+# SPDX-License-Identifier: Apache-2.0
+blank_issues_enabled: false
+contact_links:
+  - name: Question or idea
+    url: https://github.com/pakgrou-porg/yardmaster/discussions
+    about: Ask a question or float an idea in Discussions.
+  - name: Security vulnerability
+    url: https://github.com/pakgrou-porg/yardmaster/security/advisories/new
+    about: Report privately. Do NOT open a public issue. See SECURITY.md.

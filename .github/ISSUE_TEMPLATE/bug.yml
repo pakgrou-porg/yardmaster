@@ -1,0 +1,49 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Karl Miller
+# SPDX-License-Identifier: Apache-2.0
+name: Bug report
+description: Something is broken and you can reproduce it.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not paste prompts, model responses, API keys, or pairing PINs.
+        For security issues, use a private advisory instead (see SECURITY.md).
+  - type: input
+    id: version
+    attributes:
+      label: Yardmaster version or commit
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options: [Linux, macOS, Windows]
+    validations:
+      required: true
+  - type: input
+    id: engines
+    attributes:
+      label: Engine(s) and model(s)
+      description: e.g. Ollama qwen4:12b, LM Studio; note if a remote provider was enabled.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Sanitized logs
+      description: Operational metadata only. Remove host names and addresses if sensitive.
+      render: text

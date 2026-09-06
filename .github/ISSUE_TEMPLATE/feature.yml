@@ -1,0 +1,42 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Karl Miller
+# SPDX-License-Identifier: Apache-2.0
+name: Feature request
+description: Propose a change to what Yardmaster does.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do that Yardmaster makes hard or impossible today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change and observable outcome
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Model selection (Switchyard algorithms)
+        - Placement (PAIR scheduler)
+        - Ingress / translation
+        - Providers (remote / LAN)
+        - LAN discovery
+        - Metrics / reporting
+        - Plan / execute tiering
+        - DeepSeek Harness integration
+        - Desktop / TUI
+        - Other
+    validations:
+      required: true
+  - type: checkboxes
+    id: locality
+    attributes:
+      label: Locality
+      options:
+        - label: This change keeps prompts on the local network by default.

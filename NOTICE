@@ -1,0 +1,59 @@
+Yardmaster
+Copyright (c) 2026 Karl Miller
+
+This product includes software developed at NVIDIA CORPORATION & AFFILIATES.
+
+================================================================================
+Included and composed works
+================================================================================
+
+This project includes code from NVIDIA NeMo Switchyard.
+  Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+  Licensed under the Apache License, Version 2.0.
+  Upstream:       https://github.com/NVIDIA-NeMo/Switchyard
+  Pinned commit:  9a743e89223a0d5b14011f1226d5b068f730a3b8
+  Switchyard is consumed as a set of pinned git dependencies by
+  crates/yardmaster-dataplane (switchyard-protocol, switchyard-translation,
+  switchyard-libsy, switchyard-llm-client, switchyard-server). It is NOT
+  vendored or forked. Any unavoidable build-time change lives as a minimal
+  patch under patches/switchyard/ with a header explaining why, and is tracked
+  by a corresponding issue in this repository.
+
+This project includes code from NVIDIA Personal AI Router (PAIR).
+  Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+  Licensed under the Apache License, Version 2.0.
+  Upstream:       https://github.com/NVIDIA/Personal-AI-Router
+  Pinned commit:  13b68115fa2c9c1d94f1ead1358f8d5a527cfecf
+  PAIR's services/ and desktop/ trees are vendored into this repository via
+  git subtree (not submodule), preserving upstream history. Every vendored file
+  retains its original SPDX-FileCopyrightText and SPDX-License-Identifier
+  headers and NVIDIA copyright lines, untouched.
+
+This project uses DeepSeek Harness (dsh) as an unmodified, MIT-licensed
+dependency. It is neither vendored nor forked.
+  Copyright (c) 2026 DeepSeek
+  Upstream:       https://github.com/deepseek-ai/deepseek-harness
+  Pinned commit:  d347e703908d0406b7a7ef80e3a0e594d86b2215
+  Pinned version: @deepseek-ai/dsh@0.1.3-alpha.1
+  The MIT license text for DeepSeek Harness is reproduced in
+  THIRD_PARTY_NOTICES.md.
+
+================================================================================
+Attribution
+================================================================================
+
+Files under services/ and desktop/, and portions of other files derived from
+the projects above, are Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES
+and retain their original SPDX headers. New files authored for Yardmaster carry
+"SPDX-License-Identifier: Apache-2.0" and a Yardmaster copyright line.
+
+This product is licensed under the Apache License, Version 2.0 (the "License").
+You may obtain a copy of the License in the LICENSE file at the root of this
+repository, or at:
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software distributed
+under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+CONDITIONS OF ANY KIND, either express or implied. See the License for the
+specific language governing permissions and limitations under the License.
