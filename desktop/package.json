@@ -102,7 +102,7 @@
     "devDependencies": {
         "@electron-toolkit/eslint-config-prettier": "^3.0.0",
         "@electron-toolkit/eslint-config-ts": "^3.0.0",
-        "@electron-toolkit/tsconfig": "^1.0.1",
+        "@electron-toolkit/tsconfig": "^2.0.0",
         "@fiahfy/icns": "^0.0.7",
         "@tailwindcss/postcss": "^4.1.8",
         "@tailwindcss/vite": "^4.1.8",
