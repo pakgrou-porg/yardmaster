@@ -95,7 +95,7 @@
         "overlayscrollbars": "^2.13.0",
         "overlayscrollbars-react": "^0.5.6",
         "react": "^19.0.0",
-        "react-dom": "^19.0.0",
+        "react-dom": "^19.2.8",
         "react-flip-toolkit": "^7.2.4",
         "zustand": "^5.0.3"
     },
@@ -108,7 +108,7 @@
         "@tailwindcss/vite": "^4.1.8",
         "@types/node": "^22.19.17",
         "@types/react": "^19.0.0",
-        "@types/react-dom": "^19.0.0",
+        "@types/react-dom": "^19.2.7",
         "@vitejs/plugin-react": "^4.3.4",
         "@vitest/coverage-v8": "^3.2.4",
         "electron": "^42.9.3",
