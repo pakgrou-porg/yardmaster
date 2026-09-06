@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Karl Miller
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "yardmaster-plan-execute"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "libsy routing algorithm: planner/worker/judge tiering. Client hints -> stage_router signals -> judge fallback. escalate_on / demote_after_plan."
+
+[dependencies]
+switchyard-libsy.workspace = true
+switchyard-protocol.workspace = true
+yardmaster-placement.workspace = true
+yardmaster-cost.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+async-trait.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+serde_json.workspace = true

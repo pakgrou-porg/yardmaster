@@ -1,0 +1,92 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Karl Miller
+# SPDX-License-Identifier: Apache-2.0
+
+[workspace]
+resolver = "3"
+members = [
+    "crates/yardmaster-dataplane",
+    "crates/yardmaster-placement",
+    "crates/yardmaster-ollama-translation",
+    "crates/yardmaster-cluster-trust",
+    "crates/yardmaster-control-client",
+    "crates/yardmaster-providers",
+    "crates/yardmaster-plan-execute",
+    "crates/yardmaster-metrics",
+    "crates/yardmaster-cost",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96.1"
+license = "Apache-2.0"
+authors = ["Karl Miller"]
+repository = "https://github.com/pakgrou-porg/yardmaster"
+
+# --- Switchyard, consumed as pinned git dependencies (never forked). ---
+# See docs/decisions/0004-switchyard-as-git-dependency.md. If a needed hook is
+# missing upstream, add a minimal patch under patches/switchyard/ and a [patch]
+# entry below, with a tracking issue.
+[workspace.dependencies]
+switchyard-protocol = { git = "https://github.com/NVIDIA-NeMo/Switchyard", rev = "9a743e89223a0d5b14011f1226d5b068f730a3b8", package = "switchyard-protocol" }
+switchyard-translation = { git = "https://github.com/NVIDIA-NeMo/Switchyard", rev = "9a743e89223a0d5b14011f1226d5b068f730a3b8", package = "switchyard-translation" }
+switchyard-libsy = { git = "https://github.com/NVIDIA-NeMo/Switchyard", rev = "9a743e89223a0d5b14011f1226d5b068f730a3b8", package = "switchyard-libsy" }
+switchyard-llm-client = { git = "https://github.com/NVIDIA-NeMo/Switchyard", rev = "9a743e89223a0d5b14011f1226d5b068f730a3b8", package = "switchyard-llm-client" }
+switchyard-server = { git = "https://github.com/NVIDIA-NeMo/Switchyard", rev = "9a743e89223a0d5b14011f1226d5b068f730a3b8", package = "switchyard-server" }
+
+# Yardmaster crates, referenced by path within the workspace.
+yardmaster-placement = { path = "crates/yardmaster-placement", version = "0.1.0" }
+yardmaster-ollama-translation = { path = "crates/yardmaster-ollama-translation", version = "0.1.0" }
+yardmaster-cluster-trust = { path = "crates/yardmaster-cluster-trust", version = "0.1.0" }
+yardmaster-control-client = { path = "crates/yardmaster-control-client", version = "0.1.0" }
+yardmaster-providers = { path = "crates/yardmaster-providers", version = "0.1.0" }
+yardmaster-plan-execute = { path = "crates/yardmaster-plan-execute", version = "0.1.0" }
+yardmaster-metrics = { path = "crates/yardmaster-metrics", version = "0.1.0" }
+yardmaster-cost = { path = "crates/yardmaster-cost", version = "0.1.0" }
+
+# Third-party. Versions are aligned with Switchyard's workspace where they
+# overlap; CI builds with --locked against the committed Cargo.lock.
+anyhow = "1"
+async-stream = "0.3"
+async-trait = "0.1"
+axum = { version = "0.8", features = ["json", "http2"] }
+base64 = "0.22"
+bytes = "1"
+clap = { version = "4", features = ["derive", "env"] }
+futures = "0.3"
+futures-util = "0.3"
+glob = "0.3"
+http = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["server", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+opentelemetry = "0.27"
+opentelemetry-otlp = { version = "0.27", default-features = false, features = ["grpc-tonic", "trace", "metrics"] }
+opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
+parking_lot = "0.12"
+prometheus = "0.13"
+rand = "0.10"
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls-tls", "stream"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pemfile = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+tokio-util = { version = "0.7", features = ["io"] }
+toml = "0.8"
+tracing = { version = "0.1", default-features = false, features = ["attributes", "std"] }
+tracing-opentelemetry = "0.28"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+x509-parser = "0.16"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"
+
+# [patch."https://github.com/NVIDIA-NeMo/Switchyard"]
+# Populated only if patches/switchyard/*.patch become necessary; each entry is
+# paired with a tracking issue proposing the change upstream. Empty today.

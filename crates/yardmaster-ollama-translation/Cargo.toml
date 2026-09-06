@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Karl Miller
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "yardmaster-ollama-translation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Ollama-native wire format <-> switchyard-protocol. Lets a client speaking /api/chat be served by an LM Studio node and vice versa."
+
+[dependencies]
+switchyard-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+bytes.workspace = true
+thiserror.workspace = true
+async-stream.workspace = true
+futures.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

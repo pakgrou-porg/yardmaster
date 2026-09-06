@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Karl Miller
+# SPDX-License-Identifier: Apache-2.0
+
+# Pinned to satisfy Switchyard's workspace (edition 2024, rust-version 1.96.1),
+# which Yardmaster consumes as git dependencies. See docs/decisions/0004-*.md.
+[toolchain]
+channel = "1.96.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

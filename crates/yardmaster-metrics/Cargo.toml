@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Karl Miller
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "yardmaster-metrics"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Event schema, SQLite (WAL) store, hourly/daily rollups, Prometheus + OTLP exporters, and the Markdown report generator. No prompt or completion text, ever."
+
+[dependencies]
+yardmaster-cost.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+prometheus.workspace = true
+opentelemetry.workspace = true
+opentelemetry_sdk.workspace = true
+opentelemetry-otlp.workspace = true
+parking_lot.workspace = true
+clap.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

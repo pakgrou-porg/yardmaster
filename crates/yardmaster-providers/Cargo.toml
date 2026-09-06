@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Karl Miller
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "yardmaster-providers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Remote/LAN provider kinds behind one trait: openrouter, venice, kie, openai_compatible. list_models / chat / stream / usage / cost_estimate."
+
+[dependencies]
+switchyard-protocol.workspace = true
+yardmaster-cost.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+async-trait.workspace = true
+glob.workspace = true
+futures.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

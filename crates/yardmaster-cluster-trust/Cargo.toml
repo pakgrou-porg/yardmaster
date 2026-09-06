@@ -1,0 +1,26 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Karl Miller
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "yardmaster-cluster-trust"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Reads PAIR's on-disk identity, certificates, and pin store; provides an mTLS acceptor and connector. One trust store, never a second."
+
+[dependencies]
+rustls.workspace = true
+tokio-rustls.workspace = true
+rustls-pemfile.workspace = true
+x509-parser.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
