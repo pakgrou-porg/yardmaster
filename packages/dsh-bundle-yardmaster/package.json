@@ -37,7 +37,7 @@
     "@deepseek-ai/dsh": "0.1.2-rc.1",
     "@pakgrou-porg/dsh-yardmaster": "workspace:*",
     "js-yaml": "^4.1.0",
-    "typescript": "^5.6.0",
+    "typescript": "^7.0.2",
     "vitest": "^2.1.0"
   },
   "publishConfig": {
