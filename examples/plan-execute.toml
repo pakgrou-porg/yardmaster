@@ -1,0 +1,66 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Karl Miller
+# SPDX-License-Identifier: Apache-2.0
+#
+# Planner/worker/judge tiering wired to Claude Code and Codex through
+# Switchyard's launcher. Local planner where one is present; provider planner as
+# a fallback. Worker tier is local models only. This file passes
+# `yardmaster-dataplane dry-run` in CI.
+#
+# Usage with Claude Code:
+#   export ANTHROPIC_BASE_URL=http://localhost:4000
+#   export ANTHROPIC_MODEL=plan-execute
+#   claude
+#
+# Usage with Codex:
+#   export OPENAI_BASE_URL=http://localhost:1234/v1
+#   export OPENAI_MODEL=plan-execute
+#   codex
+
+schema_version = 1
+
+[egress]
+allow_remote = false   # the provider planner below is only reachable once you
+                       # set this true AND flip the desktop Settings -> Egress
+                       # toggle. Until then the route uses the local planner.
+allow_lan = true
+
+[placement]
+policy = "pair_default"
+
+# --- remote provider for the fallback planner (declared, not enabled) ---------
+[providers.openrouter]
+base_url = "https://openrouter.ai/api/v1"
+api_key_env = "OPENROUTER_API_KEY"
+budget_usd_per_day = 5.0
+
+# --- targets ----------------------------------------------------------------
+[targets]
+
+# --- tiers ----------------------------------------------------------------------
+[tiers.planner]
+role = "planner"
+# First available under the cost ceiling wins. Local first, provider as fallback.
+models = ["qwen4:72b", "nemotron-3.5-ultra", "openrouter/anthropic/claude-opus-5"]
+max_cost_usd_per_1k_tokens = 0.05
+
+[tiers.worker]
+role = "worker"
+models = ["qwen4:12b", "nemotron-3.5-lightning"]
+max_cost_usd_per_1k_tokens = 0.002
+
+[tiers.judge]
+role = "judge"
+models = ["qwen4:4b"]
+
+# --- the route ----------------------------------------------------------------
+[routes.plan-execute]
+id = "plan-execute"
+type = "plan_execute"
+planner_tier = "planner"
+worker_tier = "worker"
+judge_tier = "judge"
+escalate_on = ["tool_error", "repeated_failure", "long_context"]
+demote_after_plan = true
+judge_egress = "deny"
+context_window = 200000
+tool_calling = true
