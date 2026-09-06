@@ -126,11 +126,25 @@ steps are in [docs/migrating-from-pair.md](docs/migrating-from-pair.md).
 | [docs/migrating-from-switchyard.md](docs/migrating-from-switchyard.md) | Mapping URL targets to `locality = "remote"`, converting a vLLM target into a cluster node |
 | [docs/decisions/](docs/decisions/) | Architecture Decision Records |
 
+## Project status
+
+Yardmaster is **bootstrapped**: the repository structure, legal and governance
+files, the `git subtree` import of PAIR's `services/` and `desktop/`, the Cargo
+workspace with typed crate skeletons, the `yardmaster-lan-scanner` Go worker
+scaffold (config validation, store, and classification implemented and tested),
+the DeepSeek Harness plugin and bundle (tier policy, adapter headers, and the
+bundle patch implemented and tested), all CI workflows, and the full docs set
+and ADRs are in place. Each subsystem's implementation is tracked by a
+[`blocked`](https://github.com/pakgrou-porg/yardmaster/issues?q=is%3Aissue+label%3Ablocked)
+issue. See [decisions/0002](docs/decisions/0002-bootstrap-scope.md).
+
 ## Releases
 
 See the [releases page](https://github.com/pakgrou-porg/yardmaster/releases).
 Release artifacts are **unsigned**; code signing and notarization are not yet in
-scope and the gap is noted in each release's notes.
+scope and the gap is noted in each release's notes. The first tag is deferred
+until the workspace builds end to end
+([#39](https://github.com/pakgrou-porg/yardmaster/issues/39)).
 
 ## Where Yardmaster is going
 
