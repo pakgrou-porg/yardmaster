@@ -99,6 +99,11 @@ jobs:
       - run: pnpm -C packages/dsh-yardmaster test
       - run: pnpm -C packages/dsh-bundle-yardmaster typecheck
       - run: pnpm -C packages/dsh-bundle-yardmaster test
+      - name: yardmaster-console (node:test)
+        run: |
+          npm --prefix packages/yardmaster-console install --no-audit --no-fund
+          npm --prefix packages/yardmaster-console run typecheck
+          npm --prefix packages/yardmaster-console test
       - name: both profiles --dump-config without warnings
         run: |
           set -e

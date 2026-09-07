@@ -73,6 +73,16 @@ docker-build: ## Build the headless node image (docker/Dockerfile)
 
 .PHONY: docker-lint
 docker-lint: ## Validate the Portainer stack files and the entrypoint
-	@for f in deploy/portainer/*.stack.yml; do \
+	@for f in deploy/portainer/*.stack.yml deploy/portainer/examples/*.stack.yml; do \
 	  echo "  $$f"; YM_CONFIG_FILE=/dev/null docker compose -f "$$f" config -q; done
 	shellcheck docker/entrypoint.sh
+
+.PHONY: console
+console: ## Run the Yardmaster Console locally on :8770
+	npm --prefix packages/yardmaster-console install
+	npm --prefix packages/yardmaster-console start
+
+.PHONY: console-test
+console-test: ## Test the Yardmaster Console
+	npm --prefix packages/yardmaster-console install
+	npm --prefix packages/yardmaster-console test

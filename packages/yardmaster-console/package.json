@@ -1,0 +1,24 @@
+{
+  "name": "@pakgrou-porg/yardmaster-console",
+  "version": "0.1.0",
+  "description": "Loopback web console to configure and observe Yardmaster (config editor + validator, live backend probes, metrics view) and reach the DeepSeek Harness Web UI, before a full console is deployed over it.",
+  "license": "Apache-2.0",
+  "author": "Karl Miller",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pakgrou-porg/yardmaster",
+    "directory": "packages/yardmaster-console"
+  },
+  "type": "module",
+  "bin": { "yardmaster-console": "src/server.mjs" },
+  "files": ["src", "public", "README.md"],
+  "scripts": {
+    "start": "node src/server.mjs",
+    "test": "node --test --test-force-exit \"test/*.test.mjs\"",
+    "typecheck": "node --check src/server.mjs && node --check src/validate.mjs && node --check src/backends.mjs && node --check src/metrics.mjs"
+  },
+  "dependencies": {
+    "smol-toml": "^1.3.1"
+  },
+  "engines": { "node": ">=22.5" }
+}

@@ -1,0 +1,75 @@
+<!doctype html>
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 Karl Miller
+SPDX-License-Identifier: Apache-2.0
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Yardmaster Console</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header>
+      <span class="brand">Yardmaster<span class="dim"> console</span></span>
+      <nav>
+        <button data-tab="config" class="active">Config</button>
+        <button data-tab="backends">Backends</button>
+        <button data-tab="metrics">Metrics</button>
+        <button data-tab="agent">Agent</button>
+      </nav>
+      <span id="status" class="dim"></span>
+    </header>
+
+    <main>
+      <section id="config" class="tab active">
+        <div class="bar">
+          <button id="cfg-validate">Validate</button>
+          <button id="cfg-save" class="primary">Validate &amp; Save</button>
+          <span id="cfg-engine" class="dim"></span>
+          <span id="cfg-path" class="dim"></span>
+        </div>
+        <textarea id="cfg-text" spellcheck="false" placeholder="# yardmaster.toml"></textarea>
+        <div id="cfg-result"></div>
+      </section>
+
+      <section id="backends" class="tab">
+        <div class="bar">
+          <button id="be-refresh">Probe now</button>
+          <label><input type="checkbox" id="be-auto" checked /> auto every 15s</label>
+        </div>
+        <div id="be-list"></div>
+      </section>
+
+      <section id="metrics" class="tab">
+        <div class="bar">
+          <label>window
+            <select id="mx-hours">
+              <option value="1">1h</option>
+              <option value="24" selected>24h</option>
+              <option value="168">7d</option>
+              <option value="720">30d</option>
+            </select>
+          </label>
+          <button id="mx-refresh">Refresh</button>
+          <span id="mx-note" class="dim"></span>
+        </div>
+        <div id="mx-tiles" class="tiles"></div>
+        <h3>By route</h3><div id="mx-routes"></div>
+        <h3>By node / provider</h3><div id="mx-nodes"></div>
+        <h3>Recent requests <span class="dim">(no prompt/response content is stored)</span></h3>
+        <div id="mx-recent"></div>
+      </section>
+
+      <section id="agent" class="tab">
+        <div class="bar">
+          <span class="dim">DeepSeek Harness Web UI — <code id="ag-url"></code></span>
+          <a id="ag-open" target="_blank" rel="noreferrer">open in a tab</a>
+        </div>
+        <iframe id="ag-frame" title="DeepSeek Harness"></iframe>
+      </section>
+    </main>
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>
