@@ -4,17 +4,19 @@
 # Headless Yardmaster node image: the nvpair-ui-broker control plane, every Go
 # worker, the Rust data plane, and the LAN scanner — no Electron, no desktop.
 #
-# Build context is the repo root:
-#   docker build -f docker/Dockerfile -t yardmaster:dev .
+# Build context is the repo root. Two final targets:
 #
-# NOTE: the Rust and Go builds require network access at build time to resolve
-# the pinned Switchyard git dependencies and the vendored PAIR module deps.
-# Until crates/ compiles cleanly (tracked in issue #36) the `rust-build` stage
-# will fail; build with `--target go-only` for a control-plane-only image in the
-# meantime (see docs/deployment-docker.md).
+#   docker build -f docker/Dockerfile --target runtime-proxy -t yardmaster:proxy .
+#       Go workers only (PAIR ollama-proxy + lmstudio-proxy). Builds today.
+#       Run it with YM_DATAPLANE_MODE=proxy.
+#
+#   docker build -f docker/Dockerfile -t yardmaster:dev .
+#       Full image, adds the Rust yardmaster-dataplane. The rust-build stage
+#       needs the Cargo workspace to compile (issue #36) and build-time network
+#       for the pinned Switchyard git deps.
 
 # ---------------------------------------------------------------------------
-# Stage 1 — Go: vendored PAIR services + yardmaster-lan-scanner
+# Stage — Go: vendored PAIR services + yardmaster-lan-scanner
 # ---------------------------------------------------------------------------
 FROM golang:1.25-bookworm AS go-build
 ENV CGO_ENABLED=0 GOFLAGS=-trimpath
@@ -25,12 +27,13 @@ COPY services/ ./services/
 # stages them into services/build/bin/.
 RUN cd services && ./build.sh
 # Yardmaster's own Go worker (not part of the vendored tree).
-RUN cd services/yardmaster-lan-scanner \
+RUN mkdir -p /out \
+    && cd services/yardmaster-lan-scanner \
     && go build -mod=mod -o /out/yardmaster-lan-scanner ./... \
     && cp /src/services/build/bin/* /out/ 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
-# Stage 2 — Rust: yardmaster-dataplane
+# Stage — Rust: yardmaster-dataplane (only used by the `runtime` target)
 # ---------------------------------------------------------------------------
 FROM rust:1.96-bookworm AS rust-build
 WORKDIR /src
@@ -38,20 +41,20 @@ COPY rust-toolchain.toml Cargo.toml ./
 COPY crates/ ./crates/
 COPY patches/ ./patches/
 # No Cargo.lock committed yet (issue #36); drop --locked until it lands.
-RUN cargo build --release -p yardmaster-dataplane \
-    && cp target/release/yardmaster-dataplane /out/yardmaster-dataplane || \
-    (mkdir -p /out && echo "rust-build failed — see issue #36" && exit 1)
+RUN mkdir -p /out \
+    && cargo build --release -p yardmaster-dataplane \
+    && cp target/release/yardmaster-dataplane /out/yardmaster-dataplane
 
 # ---------------------------------------------------------------------------
-# Stage 3 — optional: DeepSeek Harness (dsh) for the in-container agent
+# Stage — optional: DeepSeek Harness (dsh) for the in-container agent
 # ---------------------------------------------------------------------------
 FROM node:24-bookworm-slim AS dsh
 RUN npm i -g @deepseek-ai/dsh@0.1.2-rc.1 && npm cache clean --force
 
 # ---------------------------------------------------------------------------
-# Stage 4 — runtime
+# Stage — runtime-base: everything except the backend binaries
 # ---------------------------------------------------------------------------
-FROM debian:bookworm-slim AS runtime
+FROM debian:bookworm-slim AS runtime-base
 LABEL org.opencontainers.image.source="https://github.com/pakgrou-porg/yardmaster"
 LABEL org.opencontainers.image.description="Headless Yardmaster node: two-stage LLM router (Switchyard model selection + PAIR node placement)"
 LABEL org.opencontainers.image.licenses="Apache-2.0"
@@ -63,12 +66,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Non-root by default. The data volume is chowned in the entrypoint.
 RUN useradd --system --create-home --uid 10001 --shell /usr/sbin/nologin yardmaster
 
-# All backend binaries live together so the broker resolves its siblings by
-# default (its --*-path flags default to ./ in the working directory).
-WORKDIR /opt/yardmaster/bin
-COPY --from=go-build   /out/            /opt/yardmaster/bin/
-COPY --from=rust-build /out/yardmaster-dataplane /opt/yardmaster/bin/
-# dsh (optional): only used when YM_AGENT=1
+# dsh (optional): only invoked when YM_AGENT=1.
 COPY --from=dsh /usr/local/lib/node_modules /opt/yardmaster/node_modules
 COPY --from=dsh /usr/local/bin/node /usr/local/bin/node
 RUN ln -s /opt/yardmaster/node_modules/@deepseek-ai/dsh/bin/dsh.mjs /usr/local/bin/dsh || true
@@ -76,7 +74,10 @@ RUN ln -s /opt/yardmaster/node_modules/@deepseek-ai/dsh/bin/dsh.mjs /usr/local/b
 COPY docker/entrypoint.sh /usr/local/bin/yardmaster-entrypoint
 RUN chmod +x /usr/local/bin/yardmaster-entrypoint
 
-# Data dir (cluster identity, pins, yardmaster.toml, metrics db). Mount a volume here.
+# All backend binaries live together so the broker resolves its siblings by
+# default (its --*-path flags default to ./ in the working directory).
+WORKDIR /opt/yardmaster/bin
+
 ENV YM_DATA_DIR=/data \
     XDG_CONFIG_HOME=/data \
     NVPAIR_LOG_LEVEL=info \
@@ -93,3 +94,18 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=5 \
 
 USER yardmaster
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/yardmaster-entrypoint"]
+
+# ---------------------------------------------------------------------------
+# Target — runtime-proxy: Go workers only. Builds and runs today.
+# ---------------------------------------------------------------------------
+FROM runtime-base AS runtime-proxy
+COPY --from=go-build /out/ /opt/yardmaster/bin/
+
+# ---------------------------------------------------------------------------
+# Target — runtime (default): adds the Rust data plane. Needs issue #36.
+# ---------------------------------------------------------------------------
+FROM runtime-proxy AS runtime
+COPY --from=rust-build /out/yardmaster-dataplane /opt/yardmaster/bin/
+ENV YM_DATAPLANE_MODE=proxy
+# ^ still 'proxy' by default until the broker learns --dataplane-path (issue #26);
+#   set YM_DATAPLANE_MODE=dataplane once that lands.

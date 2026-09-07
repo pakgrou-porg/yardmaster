@@ -87,6 +87,23 @@ Edit the stack: comment out `image:` and uncomment the `build:` block. Portainer
 builds `docker/Dockerfile` with the repo as context. This needs build-time
 network access for the pinned Switchyard git deps and the PAIR module deps.
 
+The Dockerfile has two final targets:
+
+| `--target` | Contents | Status |
+| --- | --- | --- |
+| `runtime-proxy` | Go workers only (PAIR `ollama-proxy` + `lmstudio-proxy`) | **builds today**; run with `YM_DATAPLANE_MODE=proxy` |
+| `runtime` (default) | adds the Rust `yardmaster-dataplane` | needs [#36](https://github.com/pakgrou-porg/yardmaster/issues/36) |
+
+Set `target: runtime-proxy` in the stack's `build:` block for a working image
+now.
+
+### Machine-specific example
+
+[deployment-framework-strix-halo.md](deployment-framework-strix-halo.md) is a
+complete walkthrough for a Framework Desktop (Ryzen AI Max+ 395, 128 GB unified
+memory) on Fedora 44, with a ROCm Ollama engine — Docker CE vs podman, SELinux,
+firewalld, the BIOS iGPU-memory setting, and GPU verification.
+
 ### Providing `yardmaster.toml`
 
 - **Simple:** deploy first, then `docker cp` or edit the file inside the volume

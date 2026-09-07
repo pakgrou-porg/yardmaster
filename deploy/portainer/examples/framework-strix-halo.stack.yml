@@ -1,0 +1,93 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Karl Miller
+# SPDX-License-Identifier: Apache-2.0
+#
+# Yardmaster + ROCm Ollama on a Framework Desktop (AMD Ryzen AI Max+ 395 /
+# "Strix Halo", Radeon 8060S iGPU, 128 GB unified memory), Fedora 44.
+#
+# Read docs/deployment-framework-strix-halo.md first — it covers the Fedora
+# prerequisites (Docker CE vs podman, SELinux, firewalld) and the BIOS iGPU
+# memory setting that ROCm needs to see a large VRAM pool.
+#
+# Deploy in Portainer: Stacks -> Add stack -> Repository, compose path
+#   deploy/portainer/examples/framework-strix-halo.stack.yml
+# or paste this file into the web editor. Set variables in the stack's
+# "Environment variables" panel (see deploy/portainer/.env.example).
+#
+# The `yardmaster` service builds from source with `target: runtime-proxy`,
+# which is the image that builds today (Go workers only; the Rust data plane
+# lands with issue #36). It runs a PAIR-style router on 11434 / 1234.
+
+services:
+  # ----- ROCm Ollama: the engine, GPU-accelerated on the 8060S ---------------
+  ollama:
+    image: docker.io/ollama/ollama:rocm
+    container_name: yardmaster-ollama
+    restart: unless-stopped
+    # ROCm device access. On Fedora, confirm the container can use them:
+    #   getent group render video      # note the GIDs
+    # and if `group_add` by name does not work, replace with those numbers.
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    group_add:
+      - video
+      - render
+    # Some Fedora + ROCm combos need a looser seccomp profile for HIP. Uncomment
+    # if `rocminfo` inside the container fails with a permission error.
+    # security_opt:
+    #   - seccomp=unconfined
+    ipc: host
+    ports:
+      - "127.0.0.1:11435:11434"   # loopback only; Yardmaster fronts the LAN
+    environment:
+      # gfx1151 (8060S) is supported by ROCm >= 6.4 without an override. If model
+      # loads fail with "no compatible GPUs", set this and restart:
+      # HSA_OVERRIDE_GFX_VERSION: "11.5.1"
+      OLLAMA_HOST: "0.0.0.0:11434"
+      # 128 GB unified memory: keep models hot and allow real concurrency.
+      OLLAMA_KEEP_ALIVE: "30m"
+      OLLAMA_MAX_LOADED_MODELS: "3"
+      OLLAMA_NUM_PARALLEL: "4"
+      OLLAMA_FLASH_ATTENTION: "1"
+      # Optional: quantized KV cache trades a little quality for a lot of context.
+      # OLLAMA_KV_CACHE_TYPE: "q8_0"
+    volumes:
+      - ollama-models:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "ls"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # ----- Yardmaster: the router --------------------------------------------
+  yardmaster:
+    build:
+      context: ../../..
+      dockerfile: docker/Dockerfile
+      target: runtime-proxy
+    image: yardmaster:proxy-local
+    container_name: yardmaster
+    restart: unless-stopped
+    network_mode: host
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      NVPAIR_LOG_LEVEL: ${NVPAIR_LOG_LEVEL:-info}
+      YM_DATAPLANE_MODE: proxy
+      YM_HEALTHCHECK_URL: http://127.0.0.1:11434/api/tags
+      # Set these only if you also enable remote egress in yardmaster.toml.
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      VENICE_API_KEY: ${VENICE_API_KEY:-}
+      KIE_API_KEY: ${KIE_API_KEY:-}
+    volumes:
+      - yardmaster-data:/data
+      # To pin a yardmaster.toml: uncomment, set an absolute host path, keep the
+      # :ro,Z suffix so SELinux relabels it for the container.
+      # - /etc/yardmaster/yardmaster.toml:/config/yardmaster.toml:ro,Z
+
+volumes:
+  yardmaster-data:
+    name: yardmaster-data
+  ollama-models:
+    name: yardmaster-ollama-models
