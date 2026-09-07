@@ -1,0 +1,81 @@
+{
+  "_meta": {
+    "purpose": "pair_default node ordering — the sort in nvpair-job-scheduler Manager.rank",
+    "source": "NVIDIA/Personal-AI-Router services/nvpair-job-scheduler/schedule.go + schedule_test.go",
+    "pinned_commit": "13b68115fa2c9c1d94f1ead1358f8d5a527cfecf",
+    "rule": "sort by (pending + gpu_pressure) asc, then gpu_pressure asc, then id asc; rank = index",
+    "regenerate": "see tests/fixtures/README.md"
+  },
+  "cases": [
+    {
+      "name": "cold_start_id_sort",
+      "mirrors": "TestRank_ColdStartIDSort",
+      "nodes": [
+        {"id": "c", "pending": 0, "gpu_pressure": 0},
+        {"id": "a", "pending": 0, "gpu_pressure": 0},
+        {"id": "b", "pending": 0, "gpu_pressure": 0}
+      ],
+      "expected_order": ["a", "b", "c"]
+    },
+    {
+      "name": "ascending_by_pending",
+      "mirrors": "TestRank_AscendingByPending",
+      "nodes": [
+        {"id": "a", "pending": 2, "gpu_pressure": 0},
+        {"id": "b", "pending": 0, "gpu_pressure": 0},
+        {"id": "c", "pending": 1, "gpu_pressure": 0}
+      ],
+      "expected_order": ["b", "c", "a"]
+    },
+    {
+      "name": "combines_pending_and_gpu_pressure",
+      "mirrors": "TestRank_CombinesPendingAndGPUPressure",
+      "nodes": [
+        {"id": "a", "pending": 0, "gpu_pressure": 3},
+        {"id": "b", "pending": 1, "gpu_pressure": 0},
+        {"id": "c", "pending": 0, "gpu_pressure": 1},
+        {"id": "d", "pending": 0, "gpu_pressure": 2}
+      ],
+      "expected_order": ["b", "c", "d", "a"]
+    },
+    {
+      "name": "unknown_and_stale_use_neutral_pressure",
+      "mirrors": "TestRank_UnknownAndStaleTelemetryUseNeutralPressure",
+      "nodes": [
+        {"id": "a", "pending": 0, "gpu_pressure": 0},
+        {"id": "b", "pending": 0, "gpu_pressure": 1},
+        {"id": "c", "pending": 0, "gpu_pressure": 1}
+      ],
+      "expected_order": ["a", "b", "c"]
+    },
+    {
+      "name": "node_wide_mixed_engine_synthetic",
+      "mirrors": "TestRank_NodeWideMixedEngineSynthetic",
+      "nodes": [
+        {"id": "a", "pending": 3, "gpu_pressure": 0},
+        {"id": "b", "pending": 1, "gpu_pressure": 0},
+        {"id": "c", "pending": 0, "gpu_pressure": 0}
+      ],
+      "expected_order": ["c", "b", "a"]
+    },
+    {
+      "name": "terminal_states_excluded",
+      "mirrors": "TestRank_TerminalStatesExcluded (pending derived: only queued/running count)",
+      "nodes": [
+        {"id": "a", "pending": 1, "gpu_pressure": 0},
+        {"id": "b", "pending": 0, "gpu_pressure": 0}
+      ],
+      "expected_order": ["b", "a"]
+    },
+    {
+      "name": "tie_breaks_on_lower_pressure_then_id",
+      "mirrors": "sort comparator second/third keys: equal load (all 2) -> lower gpu_pressure first",
+      "nodes": [
+        {"id": "z", "pending": 1, "gpu_pressure": 1},
+        {"id": "y", "pending": 0, "gpu_pressure": 2},
+        {"id": "x", "pending": 2, "gpu_pressure": 0}
+      ],
+      "expected_order": ["x", "z", "y"]
+    }
+  ]
+}

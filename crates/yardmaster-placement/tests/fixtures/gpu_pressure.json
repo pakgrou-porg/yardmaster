@@ -1,0 +1,37 @@
+{
+  "_meta": {
+    "purpose": "pair_default GPU pressure band + hysteresis mapping",
+    "source": "NVIDIA/Personal-AI-Router services/nvpair-job-scheduler/telemetry.go + telemetry_test.go",
+    "pinned_commit": "13b68115fa2c9c1d94f1ead1358f8d5a527cfecf"
+  },
+  "band": [
+    {"util": 0.0, "want": 0},
+    {"util": 39.999, "want": 0},
+    {"util": 40.0, "want": 1},
+    {"util": 69.999, "want": 1},
+    {"util": 70.0, "want": 2},
+    {"util": 84.999, "want": 2},
+    {"util": 85.0, "want": 3},
+    {"util": 100.0, "want": 3}
+  ],
+  "hysteresis": [
+    {"name": "hold one above 35", "util": 35.0, "previous": 1, "want": 1},
+    {"name": "drop one below 35", "util": 34.9, "previous": 1, "want": 0},
+    {"name": "hold two above 65", "util": 65.0, "previous": 2, "want": 2},
+    {"name": "drop two below 65", "util": 64.9, "previous": 2, "want": 1},
+    {"name": "hold three above 80", "util": 80.0, "previous": 3, "want": 3},
+    {"name": "drop three below 80", "util": 79.9, "previous": 3, "want": 2},
+    {"name": "promote at ordinary boundary", "util": 70.0, "previous": 1, "want": 2},
+    {"name": "cross multiple bands upward", "util": 90.0, "previous": 0, "want": 3},
+    {"name": "cross multiple bands downward", "util": 20.0, "previous": 3, "want": 0}
+  ],
+  "ewma": {
+    "_meta": "alpha=0.35; first fresh sample seeds EWMA=util; TestApplyTelemetrySmoothsUtilizationBeforeChangingPressure",
+    "alpha": 0.35,
+    "sequence": [
+      {"util": 0.0,   "note": "seed", "ewma_after": 0.0,   "pressure_after": 0},
+      {"util": 100.0, "note": "one hot sample", "ewma_after": 35.0, "pressure_after": 0},
+      {"util": 100.0, "note": "second hot sample", "ewma_after": 57.75, "pressure_after": 1}
+    ]
+  }
+}

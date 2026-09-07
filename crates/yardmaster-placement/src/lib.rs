@@ -19,6 +19,12 @@
 
 #![forbid(unsafe_code)]
 
+mod pair_default;
+pub use pair_default::{
+    pair_default_order, pressure_band, pressure_with_hysteresis, NodeLoad, Ranked, GPU_EWMA_ALPHA,
+    GPU_TELEMETRY_FRESHNESS_MS, UNKNOWN_GPU_PRESSURE,
+};
+
 /// Placement policy from `[placement] policy` in `yardmaster.toml`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
