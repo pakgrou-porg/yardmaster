@@ -1,10 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 Karl Miller
 # SPDX-License-Identifier: Apache-2.0
 #
-# The DeepSeek Harness integration lives in packages/. The vendored PAIR desktop
-# tree (desktop/) keeps its own npm project and is listed so a single
-# `pnpm install` at the root can drive both when needed; desktop/ is normally
-# built with its own `npm` per PAIR's AGENTS.md.
+# Only the DeepSeek Harness integration packages use pnpm. The vendored PAIR
+# desktop tree uses npm (see its AGENTS.md) and yardmaster-console uses npm +
+# node:test; both are built by their own CI steps.
 packages:
-  - "packages/*"
-  - "desktop"
+  - "packages/dsh-yardmaster"
+  - "packages/dsh-bundle-yardmaster"

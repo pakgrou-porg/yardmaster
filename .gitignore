@@ -38,3 +38,6 @@ secrets/
 
 # Test scratch
 /.scratch/
+
+# compiled Go worker binaries built in-place
+/services/yardmaster-lan-scanner/yardmaster-lan-scanner

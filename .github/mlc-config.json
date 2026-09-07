@@ -3,7 +3,8 @@
   "ignorePatterns": [
     { "pattern": "^https://github.com/pakgrou-porg/yardmaster/(issues|discussions|security|releases)" },
     { "pattern": "^http://(localhost|127\\.0\\.0\\.1)" },
-    { "pattern": "^https://(openrouter\\.ai|api\\.venice\\.ai|api\\.kie\\.ai)" }
+    { "pattern": "^https://(openrouter\\.ai|api\\.venice\\.ai|api\\.kie\\.ai)" },
+    { "pattern": "\\.(png|jpe?g|gif|svg|webp)$" }
   ],
   "aliveStatusCodes": [200, 206, 429]
 }
