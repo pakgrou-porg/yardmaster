@@ -1,65 +1,102 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 Karl Miller
 # SPDX-License-Identifier: Apache-2.0
 #
-# Yardmaster node — Portainer stack (single node per Docker host).
+# Yardmaster single node — Portainer stack. One Docker host = one node; deploy
+# this on each machine you want in the cluster and pair them with the PIN.
 #
-# This is the real deployment model: run this stack on each machine you want in
-# the cluster, then pair them with the six-digit PIN. Host networking is
-# required for mDNS discovery and for taking over ports 11434 / 1234, exactly as
-# a native install does.
+# Topology: the `ollama` service owns the network namespace; `yardmaster` (the
+# broker + proxy) and `yardmaster-console` share it (`network_mode:
+# service:ollama`). That is deliberate — the broker's auto-advertise loop probes
+# `127.0.0.1:11434` for the local engine, so engine and proxy must share
+# loopback.
 #
-# Portainer:
-#   Stacks -> Add stack -> "Repository" (this repo, path deploy/portainer/
-#   yardmaster-node.stack.yml) or paste this file in the web editor.
-#   Set the environment variables below in the Portainer "Environment variables"
-#   section (or upload deploy/portainer/.env.example as an env file).
+# Ports (all published on the `ollama` service, which owns the namespace):
+#   11434  Ollama itself (optional to expose; the proxy fronts it)
+#   11435  the Yardmaster ollama-proxy  <-- point clients here
+#    8770  the Yardmaster Console (loopback-published; widen at your own risk)
+#    3080  the DeepSeek Harness Web UI, if you run it (see docs/deployment-docker.md)
 #
-# network_mode: host is supported by Portainer on a standalone Docker host. It is
-# NOT supported under Docker Swarm — use yardmaster-bridge.stack.yml there and
-# accept that mDNS discovery will not cross the bridge.
+# CPU-only box: drop the `devices` / `group_add` from `ollama`. GPU box: see
+# deploy/portainer/examples/framework-strix-halo.stack.yml.
 
 services:
+  ollama:
+    image: docker.io/ollama/ollama:latest
+    container_name: yardmaster-ollama
+    restart: unless-stopped
+    ipc: host
+    environment:
+      OLLAMA_HOST: "127.0.0.1:11434"     # loopback inside the shared namespace
+      OLLAMA_KEEP_ALIVE: "30m"
+      OLLAMA_MAX_LOADED_MODELS: "3"
+      OLLAMA_NUM_PARALLEL: "4"
+    ports:
+      - "11435:11435"                    # the Yardmaster proxy
+      - "127.0.0.1:8770:8770"            # the Console, host-loopback only
+      # - "11434:11434"                  # uncomment for Ollama direct
+      # - "127.0.0.1:3080:3080"          # uncomment if you run dsh in-namespace
+    volumes:
+      - ollama-models:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "ls"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  yardmaster-init:
+    image: alpine:latest
+    container_name: yardmaster-init
+    command: sh -c "chown -R 10001:10001 /data"
+    volumes:
+      - yardmaster-data:/data
+
   yardmaster:
-    image: ${YM_IMAGE:-ghcr.io/pakgrou-porg/yardmaster:latest}
-    # To build from source instead of pulling an image, comment out `image:`
-    # above and uncomment:
-    # build:
-    #   context: ..
-    #   dockerfile: docker/Dockerfile
+    build:
+      context: "https://github.com/pakgrou-porg/yardmaster.git#main"
+      dockerfile: docker/Dockerfile
+      target: runtime-proxy
+    image: yardmaster:proxy-local
     container_name: yardmaster
     restart: unless-stopped
-    network_mode: host
+    network_mode: "service:ollama"
+    depends_on:
+      yardmaster-init: { condition: service_completed_successfully }
+      ollama: { condition: service_healthy }
     environment:
-      NVPAIR_LOG_LEVEL: ${NVPAIR_LOG_LEVEL:-info}
-      # proxy = works today; dataplane = after issue #26 lands.
-      YM_DATAPLANE_MODE: ${YM_DATAPLANE_MODE:-proxy}
-      # Set to 1 to also run the DeepSeek Harness agent on 127.0.0.1:3080.
-      YM_AGENT: ${YM_AGENT:-0}
-      YM_HEALTHCHECK_URL: ${YM_HEALTHCHECK_URL:-http://127.0.0.1:11434/api/tags}
-      # Provider API keys — passed through to the data plane, never written to
-      # yardmaster.toml. Leave unset unless you also enable remote egress.
-      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
-      VENICE_API_KEY: ${VENICE_API_KEY:-}
-      KIE_API_KEY: ${KIE_API_KEY:-}
+      NVPAIR_LOG_LEVEL: info
+      YM_DATAPLANE_MODE: proxy
+      YM_LOCAL_ENGINE_URL: http://127.0.0.1:11434
+      YM_HEALTHCHECK_URL: http://127.0.0.1:11435/api/tags
     volumes:
-      # Cluster identity, certificates, pin store, yardmaster.toml, metrics DB.
-      # Back this up — losing it drops the node out of the mTLS cluster.
       - yardmaster-data:/data
-      # Optional: manage yardmaster.toml as a read-only bind mount / Portainer
-      # config instead of editing it inside the volume.
-      - type: bind
-        source: ${YM_CONFIG_FILE:-/dev/null}
-        target: /config/yardmaster.toml
-        read_only: true
-    # Uncomment for NVIDIA GPU access if you also run an engine in this stack.
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: all
-    #           capabilities: [gpu]
+
+  yardmaster-console:
+    build:
+      context: "https://github.com/pakgrou-porg/yardmaster.git#main"
+      dockerfile: packages/yardmaster-console/Dockerfile
+    image: yardmaster-console:local
+    container_name: yardmaster-console
+    restart: unless-stopped
+    network_mode: "service:ollama"
+    depends_on:
+      yardmaster: { condition: service_started }
+    environment:
+      YM_CONSOLE_PORT: "8770"
+      YM_CONSOLE_BIND: 0.0.0.0
+      YM_LOCAL_ENGINE_URL: http://127.0.0.1:11434
+      YM_AGENT_URL: http://127.0.0.1:3080
+      YM_CONFIG_PATH: /config/yardmaster.toml
+      YM_CONFIG_FALLBACK: "/data/Nvidia Corporation/Personal AI Router/yardmaster.toml"
+      YM_METRICS_DB: "/data/Nvidia Corporation/Personal AI Router/yardmaster-metrics.db"
+      # The Console uses its built-in validator. It only shells out to a real
+      # `yardmaster-dataplane dry-run` if you mount that binary in and set
+      # YM_DATAPLANE_BIN to its path.
+    volumes:
+      - yardmaster-data:/data
+      # Manage yardmaster.toml from the host (keep :ro,Z for SELinux). The
+      # Console writes the data-dir fallback copy when this is read-only.
+      # - /etc/yardmaster/yardmaster.toml:/config/yardmaster.toml:ro,Z
 
 volumes:
-  yardmaster-data:
-    name: yardmaster-data
+  ollama-models: { name: yardmaster-ollama-models }
+  yardmaster-data: { name: yardmaster-data }

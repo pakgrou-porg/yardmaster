@@ -5,191 +5,152 @@ SPDX-License-Identifier: Apache-2.0
 
 # Deploying Yardmaster with Docker and Portainer
 
-Yardmaster's first-class shape is a **desktop app**. This page covers the
-**headless container** path: the `nvpair-ui-broker` control plane plus every Go
-worker, the Rust data plane, and the LAN scanner, with no Electron and no
-desktop UI. It suits a homelab / Portainer deployment where you want the router
-to run as a service.
+Yardmaster's first-class shape is the PAIR **desktop app**. This page covers the
+**headless container** path — the `nvpair-ui-broker` control plane plus every Go
+worker (and, when it builds, the Rust data plane) with no Electron — plus the
+**Yardmaster Console** (ADR-0023) for configuration and observability while the
+data plane and the full UI (issue #32) are built.
 
-> **Status.** The image build is wired but not yet green: the Rust workspace
-> does not compile in this environment ([#36](https://github.com/pakgrou-porg/yardmaster/issues/36))
-> and the broker's `proxy` → `yardmaster-dataplane` flag migration is pending
-> ([#26](https://github.com/pakgrou-porg/yardmaster/issues/26)). Until then the
-> image runs in `YM_DATAPLANE_MODE=proxy` — PAIR's `ollama-proxy` /
-> `lmstudio-proxy` workers — which is a working router without Switchyard model
-> selection or the Anthropic ingress. The full path is tracked in
-> [#46](https://github.com/pakgrou-porg/yardmaster/issues/46).
+Worked, machine-specific walkthrough:
+[deployment-framework-strix-halo.md](deployment-framework-strix-halo.md).
 
-## The deployment model
+## Status
 
-**One container per Docker host.** A "cluster" is two or more hosts each running
-this stack, paired with the six-digit PIN. The container does **not** run
-multiple nodes — that is inherently multiple machines, and with host networking
-two nodes on one host would collide on ports 11434 / 1234.
+| Piece | State |
+| --- | --- |
+| `ollama` (or any engine) container | works today |
+| `yardmaster` `--target runtime-proxy` (Go workers) | builds today; PAIR-style Ollama proxy on `:11435` |
+| `yardmaster` `--target runtime` (adds Rust data plane) | blocked on [#36](https://github.com/pakgrou-porg/yardmaster/issues/36) |
+| `YM_DATAPLANE_MODE=dataplane` (Switchyard routing, `[routes]`/`[providers]`, `:4000` Anthropic) | blocked on [#26](https://github.com/pakgrou-porg/yardmaster/issues/26) |
+| `yardmaster-console` (Config / Backends / Metrics / Agent) | works today; Metrics fills in with the data plane |
+| plaintext routing through the proxy to an unmanaged sibling engine | [#47](https://github.com/pakgrou-porg/yardmaster/issues/47) |
 
-The container runs the **router**, not the engines. Yardmaster does not install
-or supervise Ollama / LM Studio inside a container. Run engines separately (on
-the host, in a sibling container, or on other nodes) and point Yardmaster at
-them as promoted LAN targets, manual nodes, or paired cluster peers.
+## Deployment model
 
-## Networking
+**One Docker host = one node.** A cluster is N hosts each running the stack,
+paired with the PIN. The container runs the **router and console**, not the
+engines — run engines as their own service/host and Yardmaster fronts them.
 
-| Mode | Stack file | mDNS discovery | Port takeover | Use when |
-| --- | --- | --- | --- | --- |
-| **host** | `yardmaster-node.stack.yml` | works | works (11434/1234/4000) | standalone Docker host (the normal case) |
-| **bridge** | `yardmaster-bridge.stack.yml` | **broken** — does not cross the bridge | published via `-p` on the host LAN IP | Docker Swarm, or host networking is not allowed |
+## Topology: one shared network namespace
 
-With the bridge variant you must use manual nodes / explicit `yardmaster.toml`
-targets and pair by typing the peer's address, and keep `[discovery] lan_scan =
-false` (the container's subnet is not your LAN).
+The broker's auto-advertise loop probes `127.0.0.1:11434` for the local engine,
+so the engine and the proxy must share loopback. The stacks put the **`ollama`**
+service in charge of the namespace and run `yardmaster` and `yardmaster-console`
+with `network_mode: service:ollama`. Every published port is declared on the
+`ollama` service.
+
+## The port model (read this)
+
+| Port | Who listens | Publish? |
+| --- | --- | --- |
+| `11434` | the engine (Ollama), on loopback in the namespace | optional (`"11434:11434"`) for engine-direct |
+| **`11435`** | the Yardmaster **proxy** — its headless default (nothing calls `set-port` without a UI) | **yes — point clients here** |
+| `8770` | the Yardmaster **Console** | host-loopback only (`"127.0.0.1:8770:8770"`) |
+| `4000` | the data plane's Anthropic + `/health` + `/metrics` | only meaningful in `dataplane` mode |
+| `14318` | PAIR node telemetry (plaintext) | **never** publish off-host |
+| `3080` | the dsh Web UI, if run in-namespace | host-loopback only |
+
+Common mistakes: putting the engine on `11435` (collides with the proxy → the
+broker refuses to wire it); expecting the proxy on `11434`; health-checking
+`11434` when the proxy is on `11435`.
+
+## Stacks
+
+| File | Use |
+| --- | --- |
+| [`deploy/portainer/yardmaster-node.stack.yml`](../deploy/portainer/yardmaster-node.stack.yml) | single node: `ollama` + `yardmaster` + `yardmaster-console`, shared namespace. The normal case. |
+| [`deploy/portainer/yardmaster-bridge.stack.yml`](../deploy/portainer/yardmaster-bridge.stack.yml) | Docker Swarm / no shared-namespace. **No auto-advertise, no mDNS** — manual config only. |
+| [`deploy/portainer/examples/framework-strix-halo.stack.yml`](../deploy/portainer/examples/framework-strix-halo.stack.yml) | the node stack with ROCm GPU access, tuned for a Framework Desktop / 128 GB. |
+
+Deploy in Portainer with **Stacks → Add stack → Repository** (URL
+`https://github.com/pakgrou-porg/yardmaster`, ref `refs/heads/main`, the compose
+path above). The first deploy builds `yardmaster` and `yardmaster-console` from
+the repo.
 
 ## Persistent state
 
-Everything that must survive a restart lives under `/data` (mount a volume
-there). PAIR's layout inside it:
+Everything lives under `/data` (one named volume). PAIR layout inside it:
 
 ```
 /data/Nvidia Corporation/Personal AI Router/
-├── cluster/            node.crt, node.key, trusted/  ← the mTLS identity and pin store
-├── yardmaster.toml     (symlinked from /config/yardmaster.toml if you bind-mount one)
+├── cluster/            node.crt, node.key, trusted/   ← the mTLS identity + pins
+├── yardmaster.toml     (or symlinked from a :ro bind mount at /config)
 ├── yardmaster-metrics.db
 └── logs/
 ```
 
-**Back up the volume.** Losing `cluster/` drops the node out of the mTLS cluster
-and you must re-pair.
+`yardmaster-init` (an ephemeral `alpine`) runs `chown -R 10001:10001 /data` so
+the non-root containers can write.
+
+Back it up — losing `cluster/` means re-pairing:
 
 ```bash
 docker run --rm -v yardmaster-data:/data -v "$PWD":/backup busybox \
   tar czf /backup/yardmaster-data.tgz -C /data .
 ```
 
-## Deploy in Portainer
+## Configuring `yardmaster.toml`
 
-### Option A — from this Git repository (recommended)
+Use the **Console** (Config tab): edit, **Validate** (mirrors
+`switchyard-server --dry-run` strictness), **Save**. Or bind-mount it read-only
+at `/config/yardmaster.toml` (keep `:ro,Z` on SELinux hosts) and the Console
+writes the data-dir fallback copy. In `runtime-proxy` mode the proxy does not
+read it — the Console does, and the data plane will.
 
-1. **Stacks → Add stack → Repository.**
-2. Repository URL `https://github.com/pakgrou-porg/yardmaster`, reference
-   `refs/heads/main`, Compose path
-   `deploy/portainer/yardmaster-node.stack.yml`.
-3. Add environment variables (see `deploy/portainer/.env.example`). At minimum
-   nothing is required; set `YM_IMAGE` to a pinned tag once releases exist.
-4. **Deploy the stack.**
+Schema is a **strict superset of Switchyard's** (`schema_version`,
+`[llm_clients]`, `[targets]`, `[routes]`, plus `[providers.*]`, `[egress]`,
+`[tiers.*]`, …). There is no `[engines.*]` table; `[cluster]` is broker-written.
+See [routing.md](routing.md) and [providers.md](providers.md).
 
-### Option B — web editor
+## The Dockerfile targets
 
-Paste `deploy/portainer/yardmaster-node.stack.yml` into the editor, fill in the
-environment variables, deploy.
-
-### Build from source instead of pulling an image
-
-Edit the stack: comment out `image:` and uncomment the `build:` block. Portainer
-builds `docker/Dockerfile` with the repo as context. This needs build-time
-network access for the pinned Switchyard git deps and the PAIR module deps.
-
-The Dockerfile has two final targets:
-
-| `--target` | Contents | Status |
-| --- | --- | --- |
-| `runtime-proxy` | Go workers only (PAIR `ollama-proxy` + `lmstudio-proxy`) | **builds today**; run with `YM_DATAPLANE_MODE=proxy` |
-| `runtime` (default) | adds the Rust `yardmaster-dataplane` | needs [#36](https://github.com/pakgrou-porg/yardmaster/issues/36) |
-
-Set `target: runtime-proxy` in the stack's `build:` block for a working image
-now.
-
-### Machine-specific example
-
-[deployment-framework-strix-halo.md](deployment-framework-strix-halo.md) is a
-complete walkthrough for a Framework Desktop (Ryzen AI Max+ 395, 128 GB unified
-memory) on Fedora 44, with a ROCm Ollama engine — Docker CE vs podman, SELinux,
-firewalld, the BIOS iGPU-memory setting, and GPU verification.
-
-### Providing `yardmaster.toml`
-
-- **Simple:** deploy first, then `docker cp` or edit the file inside the volume
-  at the path above and restart.
-- **GitOps:** set `YM_CONFIG_FILE` to an absolute host path (or a Portainer
-  config mounted into the host) and the entrypoint links it read-only into the
-  data dir. Start from `deploy/portainer/yardmaster.toml.example`.
-
-Validate a config without deploying:
-
-```bash
-docker run --rm -v "$PWD/yardmaster.toml:/config/yardmaster.toml:ro" \
-  --entrypoint /opt/yardmaster/bin/yardmaster-dataplane \
-  ghcr.io/pakgrou-porg/yardmaster:latest dry-run --config /config/yardmaster.toml
+```
+docker build -f docker/Dockerfile --target runtime-proxy -t yardmaster:proxy .   # today
+docker build -f docker/Dockerfile                          -t yardmaster:full  .   # needs #36
+docker build -f packages/yardmaster-console/Dockerfile     -t yardmaster-console .
 ```
 
 ## Pairing two containerized nodes
 
-1. Deploy the stack on host A and host B (host networking).
-2. On host A, read the PIN from the logs / a JSON-RPC client:
-   `docker logs yardmaster 2>&1 | grep -i pair`. (A headless pairing helper
-   command is tracked in [#46](https://github.com/pakgrou-porg/yardmaster/issues/46);
-   until then use the TUI: `docker exec -it yardmaster /opt/yardmaster/bin/nvpair-tui`.)
-3. On host B enter host A's PIN. The mTLS cluster forms; `cluster/trusted/` on
-   both volumes now holds the peer.
-
-## Environment variables
-
-See `deploy/portainer/.env.example`. Highlights:
-
-| Var | Default | Meaning |
-| --- | --- | --- |
-| `YM_IMAGE` | `ghcr.io/pakgrou-porg/yardmaster:latest` | image to run |
-| `NVPAIR_LOG_LEVEL` | `info` | `debug`/`info`/`warn`/`error` |
-| `YM_DATAPLANE_MODE` | `proxy` | `proxy` (today) or `dataplane` (after #26) |
-| `YM_AGENT` | `0` | `1` runs `dsh web` on `127.0.0.1:3080` inside the container |
-| `YM_HEALTHCHECK_URL` | `http://127.0.0.1:11434/api/tags` | container healthcheck target |
-| `YM_CONFIG_FILE` | `/dev/null` | host path of a `yardmaster.toml` to bind-mount |
-| `OPENROUTER_API_KEY` / `VENICE_API_KEY` / `KIE_API_KEY` | unset | provider keys, passed to the data plane, never written to the config file |
-
-## The agent (DeepSeek Harness) in a container
-
-Set `YM_AGENT=1`. `dsh web` binds `127.0.0.1:3080` **inside the container** — it
-is not published and should not be. To use it, `docker exec` into the container
-or run `dsh headless` as a one-shot:
+Deploy the stack on each host. Read the PIN and pair via the bundled TUI until
+the headless helper lands ([#46](https://github.com/pakgrou-porg/yardmaster/issues/46)):
 
 ```bash
-docker exec -it yardmaster env -u OPENROUTER_API_KEY -u VENICE_API_KEY -u KIE_API_KEY \
-  dsh headless --profile yardmaster-headless "summarize ./README.md"
+docker exec -it yardmaster /opt/yardmaster/bin/nvpair-tui
 ```
 
-The entrypoint strips `*_API_KEY` / `*_TOKEN` / `*_SECRET` from the agent's
-environment (ADR-0016). Exposing the dsh Web UI beyond loopback is out of scope.
+## The agent (DeepSeek Harness)
+
+Run `dsh` in the same namespace on `127.0.0.1:3080`; it shows in the Console's
+**Agent** tab. Until the `dsh-yardmaster` adapter has a data plane, point dsh's
+built-in OpenAI adapter at the proxy (`http://127.0.0.1:11435/v1`) so Yardmaster
+still does placement. See the Strix Halo doc §7. The dsh child inherits an
+environment stripped of `*_API_KEY` / `*_TOKEN` / `*_SECRET` (ADR-0016). Do not
+publish `3080` off-host.
 
 ## Upgrades
 
-Pin `YM_IMAGE` to a release tag. To upgrade: bump the tag and redeploy the
-stack. The volume carries identity and config across the upgrade. `latest`
-tracks `main` and can change under you — do not run it in anything you care
-about.
-
-## GPU
-
-The router needs no GPU. If you co-locate an engine (see
-`yardmaster-node-with-ollama.stack.yml`), give **the engine** the GPU via
-`deploy.resources.reservations.devices` and the NVIDIA Container Toolkit.
+Pin the build ref / image tag; redeploy. The `/data` volume carries identity and
+config across the upgrade. `#main` tracks `main` — don't rely on it for anything
+you care about.
 
 ## Security notes specific to containers
 
-- Plaintext inference ingress is still loopback-only inside the container's
-  network namespace; with host networking "loopback" is the host's loopback.
-  Cluster peers use mTLS. See [security.md](security.md).
-- The image runs as a non-root user (`uid 10001`). The volume is chowned by the
-  entrypoint on first start.
-- Node telemetry on `14318` is plaintext (inherited from PAIR). Do not publish
-  it off-host; set `[cluster] telemetry_auth = "mtls"` on shared networks.
-- Do not publish `3080` (the dsh Web UI) or `4000`'s `/metrics` to an untrusted
+- Plaintext inference ingress is loopback-only **inside the namespace**; the
+  proxy port you publish (`11435`) is the LAN entry point.
+- Images run as non-root (`uid 10001` / `10002`). The Console can write
+  `yardmaster.toml`; it never handles API keys and never reads prompt/response
+  content.
+- Node telemetry `14318` is plaintext (inherited from PAIR). `[cluster]
+  telemetry_auth = "mtls"` on shared networks.
+- Do not publish `8770` (Console), `3080` (dsh), or `14318` to an untrusted
   network.
 
 ## Known gaps
 
-Tracked in [#46](https://github.com/pakgrou-porg/yardmaster/issues/46) and its
-dependencies:
-
-- Image does not build until the Rust workspace compiles ([#36](https://github.com/pakgrou-porg/yardmaster/issues/36)).
-- `YM_DATAPLANE_MODE=dataplane` needs the broker flag migration ([#26](https://github.com/pakgrou-porg/yardmaster/issues/26)).
-- No `ghcr.io` image is published yet; use the build-from-source path or wait
-  for the first release ([#39](https://github.com/pakgrou-porg/yardmaster/issues/39)).
-- Headless pairing without the TUI needs a helper command ([#46](https://github.com/pakgrou-porg/yardmaster/issues/46)).
+Tracked in [#46](https://github.com/pakgrou-porg/yardmaster/issues/46),
+[#47](https://github.com/pakgrou-porg/yardmaster/issues/47),
+[#36](https://github.com/pakgrou-porg/yardmaster/issues/36),
+[#26](https://github.com/pakgrou-porg/yardmaster/issues/26): no published
+`ghcr.io` image yet (build from source), `dataplane` mode, headless pairing,
+deterministic proxy→sibling-engine routing.

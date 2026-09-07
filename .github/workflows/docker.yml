@@ -67,16 +67,38 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=sha
-      - name: Build (and push on non-PR)
+      - name: Build node image (and push on non-PR)
         # continue-on-error until the Rust workspace compiles (issue #36).
         continue-on-error: true
         uses: docker/build-push-action@v6
         with:
           context: .
           file: docker/Dockerfile
+          target: runtime-proxy
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+      - name: Console image metadata
+        id: cmeta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}-console
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=sha
+      - name: Build console image (and push on non-PR)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: packages/yardmaster-console/Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.cmeta.outputs.tags }}
+          labels: ${{ steps.cmeta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: false

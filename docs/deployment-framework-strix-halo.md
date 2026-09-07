@@ -5,275 +5,275 @@ SPDX-License-Identifier: Apache-2.0
 
 # Yardmaster on a Framework Desktop (Ryzen AI Max+ 395 / Strix Halo), Fedora 44
 
-Target box: AMD Ryzen AI Max+ 395 (16 × Zen 5), Radeon 8060S iGPU (RDNA 3.5,
-`gfx1151`), 128 GB LPDDR5x unified memory, Fedora 44. Deployed with Docker +
-Portainer.
+Target: AMD Ryzen AI Max+ 395 (16 × Zen 5), Radeon 8060S iGPU (RDNA 3.5,
+`gfx1151`), 128 GB LPDDR5x unified memory, Fedora 44, Docker + Portainer.
 
-This runs two containers on the one machine:
+Three containers, one shared network namespace:
 
-- **`yardmaster-ollama`** — `ollama/ollama:rocm`, GPU-accelerated on the 8060S,
-  on `127.0.0.1:11435`.
-- **`yardmaster`** — the router, host networking, fronting the LAN on
-  `11434` / `1234` and forwarding to the engine.
+| Service | What | Reach it at |
+| --- | --- | --- |
+| `ollama` (`ollama/ollama:rocm`) | the engine, GPU-accelerated on the 8060S | `127.0.0.1:11434` (in-namespace) |
+| `yardmaster` (`--target runtime-proxy`) | the broker + Ollama proxy | **`:11435`** — published to your LAN |
+| `yardmaster-console` | config editor + backend health + metrics + embedded dsh | **`:8770`** — published to Framework loopback |
 
 Stack file: [`../deploy/portainer/examples/framework-strix-halo.stack.yml`](../deploy/portainer/examples/framework-strix-halo.stack.yml).
 
-> **Status.** The `yardmaster` container builds with `target: runtime-proxy`
-> (Go workers only) — a working PAIR-style router **without** Switchyard model
-> selection or the `:4000` Anthropic ingress. The full data plane lands with
-> [#36](https://github.com/pakgrou-porg/yardmaster/issues/36) /
-> [#26](https://github.com/pakgrou-porg/yardmaster/issues/26); see
-> [#46](https://github.com/pakgrou-porg/yardmaster/issues/46). If all you want
-> today is fast local inference on the Framework, the `yardmaster-ollama`
-> service alone gets you there and you can add the router layer later.
+> **Why a shared namespace?** The broker's auto-advertise loop probes
+> `127.0.0.1:11434` for the local engine, so engine and proxy must share
+> loopback. `yardmaster` and `yardmaster-console` therefore run
+> `network_mode: service:ollama`, and every published port is declared on the
+> `ollama` service.
+
+> **What works today:** ROCm inference through `:11435`, the Console (config +
+> backend health), and the embedded dsh UI pointed at `:11435`. **What doesn't
+> yet:** Switchyard model-selection, the `:4000` Anthropic ingress, remote/vLLM
+> routing by config — all need `YM_DATAPLANE_MODE=dataplane`
+> ([#36](https://github.com/pakgrou-porg/yardmaster/issues/36) →
+> [#26](https://github.com/pakgrou-porg/yardmaster/issues/26)). Plaintext
+> routing through the proxy to the unmanaged sibling engine is tracked in
+> [#47](https://github.com/pakgrou-porg/yardmaster/issues/47); if it 502s, point
+> clients at `:11434` (Ollama direct) meanwhile.
 
 ---
 
-## 1. BIOS — give the iGPU enough memory
+## 1. BIOS — give the iGPU memory
 
-On Strix Halo the amount of VRAM ROCm sees is driven by the firmware carve-out.
-Reboot into BIOS and set the iGPU / UMA framebuffer:
+Reboot → BIOS → set the iGPU / UMA framebuffer:
 
 | BIOS wording (varies) | Set to |
 | --- | --- |
-| "UMA Frame Buffer Size" / "iGPU Memory" / "Dedicated Graphics Memory" | **at least 48 GB**, 64–96 GB if you want 70B-class models |
+| "UMA Frame Buffer Size" / "iGPU Memory" / "Dedicated Graphics Memory" | **≥ 48 GB** (64–96 GB for 70B-class models) |
 | "UMA Mode" | `UMA_SPECIFIED` / `Dedicated` (not `Auto`) |
 
-Linux `amdgpu` can also lend system RAM to the GPU via GTT, but current
-ROCm/Ollama sizing on `gfx1151` keys off the dedicated carve-out, so set it
-generously — you have 128 GB. Leave enough for the OS and the router
-(16–32 GB is plenty).
+Current ROCm/Ollama VRAM sizing on `gfx1151` keys off this carve-out. Leave
+16–32 GB for the OS + router.
 
-Verify after boot:
-
-```bash
-sudo dnf install -y rocminfo    # or run rocminfo inside the container later
-rocminfo | grep -A3 -i 'gfx1151\|Marketing Name'
-# and the pool size:
-rocminfo | grep -A2 'Pool 1' | grep Size
-```
+Verify after boot: `rocminfo | grep -A2 'Pool 1' | grep Size`.
 
 ---
 
-## 2. Fedora 44 prerequisites
-
-### 2.1 Docker CE
-
-Portainer's stack semantics (`network_mode: host`, compose build targets) are
-smoothest on Docker CE.
+## 2. Fedora 44 host prep
 
 ```bash
+# --- Docker CE ---
 sudo dnf -y install dnf-plugins-core
 sudo dnf config-manager addrepo --from-repofile=https://download.docker.com/linux/fedora/docker-ce.repo
 sudo dnf -y install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 sudo systemctl enable --now docker
-sudo usermod -aG docker "$USER"      # log out/in for this to take effect
-```
+sudo usermod -aG docker "$USER"        # log out / back in
+# (If there is no Fedora 44 build yet, point the repo at Fedora 41 packages, or
+#  use rootful podman: sudo systemctl enable --now podman.socket)
 
-If Docker CE has no Fedora 44 build yet, either point the repo at the Fedora 41
-packages (they work) or use **podman** instead:
-
-```bash
-sudo dnf -y install podman podman-docker podman-compose
-systemctl --user enable --now podman.socket
-export DOCKER_HOST=unix://$XDG_RUNTIME_DIR/podman/podman.sock
-```
-
-Podman works with Portainer and the stack files; the `:Z` SELinux relabel and
-`--device` passthrough behave the same. Rootless podman + `/dev/kfd` needs
-`--group-add keep-groups` semantics — prefer the root podman socket
-(`sudo systemctl enable --now podman.socket`, `DOCKER_HOST=unix:///run/podman/podman.sock`)
-for GPU work.
-
-### 2.2 SELinux (enforcing by default on Fedora)
-
-Allow containers to use the GPU device nodes, and expect to relabel bind mounts:
-
-```bash
+# --- SELinux: let containers use the GPU device nodes ---
 sudo setsebool -P container_use_devices on
-```
 
-- Named volumes (what this stack uses for data and models) are relabeled
-  automatically.
-- Any **bind mount** you add (e.g. a pinned `yardmaster.toml`) needs a `:ro,Z`
-  (private) or `:ro,z` (shared) suffix in the compose `volumes:` short syntax,
-  or SELinux will deny the read. The stack file has a commented example.
-- If something is still denied: `sudo ausearch -m avc -ts recent` and, as a last
-  resort for debugging only, `--security-opt label=disable` on the offending
-  service.
-
-### 2.3 firewalld
-
-Open the ingress ports for other machines on your LAN, and mDNS for discovery:
-
-```bash
-sudo firewall-cmd --permanent --add-port=11434/tcp    # Ollama-compatible ingress
-sudo firewall-cmd --permanent --add-port=1234/tcp     # OpenAI-compatible ingress
-sudo firewall-cmd --permanent --add-port=4000/tcp     # Anthropic + /health + /metrics (after #36)
+# --- firewalld: open the LAN-facing proxy + mDNS; keep the rest closed ---
+sudo firewall-cmd --permanent --add-port=11435/tcp     # the Yardmaster proxy
 sudo firewall-cmd --permanent --add-service=mdns
+# do NOT open 8770 (console), 14318 (telemetry) or 3080 (dsh) to the LAN
 sudo firewall-cmd --reload
-```
 
-Do **not** open `14318` (PAIR node telemetry, plaintext) or `3080` (dsh Web UI)
-to the LAN.
-
-### 2.4 render / video groups
-
-Add yourself (for host-side `rocminfo` / `amdgpu_top`) — the container gets
-access via `group_add` in the stack:
-
-```bash
+# --- render / video GIDs (for host-side rocminfo; container gets them via the stack) ---
 sudo usermod -aG render,video "$USER"
-getent group render video      # note the GIDs; if group_add by name fails in
-                               # the stack, put these numbers there instead
-```
+getent group render video               # note the GIDs -> put them in group_add
 
-### 2.5 Portainer
-
-```bash
+# --- Portainer ---
 docker volume create portainer_data
-docker run -d --name portainer --restart unless-stopped \
-  -p 9443:9443 \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  -v portainer_data:/data \
+docker run -d --name portainer --restart unless-stopped -p 9443:9443 \
+  -v /var/run/docker.sock:/var/run/docker.sock -v portainer_data:/data \
   portainer/portainer-ce:latest
 ```
 
-Open `https://<framework-ip>:9443` and set the admin password.
+Open `https://<framework-ip>:9443`, set the admin password.
 
 ---
 
-## 3. Deploy the stack
+## 3. `yardmaster.toml` (optional now, used later)
 
-### Option A — from the Git repository (recommended)
+Create `/etc/yardmaster/yardmaster.toml`. In `runtime-proxy` mode the proxy does
+**not** read it — the Console does (for the Backends probe and validation), and
+the data plane will once it exists. Express your local + remote nodes in the
+**real schema** (a strict superset of Switchyard's):
 
-1. Portainer → **Stacks → Add stack → Repository**.
-2. Repository URL `https://github.com/pakgrou-porg/yardmaster`, reference
-   `refs/heads/main`, Compose path
-   `deploy/portainer/examples/framework-strix-halo.stack.yml`.
-3. **Environment variables** (all optional): `NVPAIR_LOG_LEVEL`,
-   `OPENROUTER_API_KEY`, `VENICE_API_KEY`, `KIE_API_KEY`.
-4. **Deploy the stack.** The first deploy builds the `yardmaster` image
-   (`target: runtime-proxy`) from the repo — a few minutes for the Go toolchain
-   layer, then cached.
+```toml
+schema_version = 1
 
-### Option B — web editor
+[egress]
+allow_lan = true        # 10.x.x.x vLLM nodes are private-range
+allow_remote = false
 
-Paste the stack file, set variables, deploy. Portainer clones the repo for the
-build context automatically only in Option A; in the editor you must have the
-repo checked out on the host and point `build.context` at it, or switch the
-`yardmaster` service to a prebuilt image once one is published
-([#46](https://github.com/pakgrou-porg/yardmaster/issues/46)).
+[providers.local_ollama]
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:11434"
+
+[providers.asus_util]
+kind = "openai_compatible"
+base_url = "http://10.116.2.56:8002/v1"
+
+[providers.susa]
+kind = "openai_compatible"
+base_url = "http://10.116.2.120:8000/v1"
+
+[targets]
+
+[targets.local]
+id = "qwen4:12b"
+locality = "lan"
+provider = "local_ollama"
+
+[targets.util]
+id = "gemma-4-12b-utility"
+locality = "lan"
+provider = "asus_util"
+
+[targets.qwen_big]
+id = "qwen3.6-35b-a3b"
+locality = "lan"
+provider = "susa"
+
+[routes.default]
+id = "auto"
+type = "passthrough"
+target = "local"
+```
+
+There is **no `[engines.*]` table** and `[cluster]` is broker-written, not user
+config. The Console's **Validate** button catches schema mistakes.
 
 ---
 
-## 4. Pull a model and point a client
+## 4. Deploy the stack in Portainer
+
+**Stacks → Add stack → Repository:**
+
+- URL `https://github.com/pakgrou-porg/yardmaster`, ref `refs/heads/main`,
+  Compose path `deploy/portainer/examples/framework-strix-halo.stack.yml`.
+- The first deploy builds `yardmaster` (`runtime-proxy`, Go workers) and
+  `yardmaster-console` from the repo. A few minutes, then cached.
+- If the `yardmaster` build fails, deploy without it (delete that service) — the
+  `ollama` + `yardmaster-console` services still give you GPU inference plus the
+  config/health UI.
+
+Verify the `group_add` GIDs match `getent group video render` from step 2;
+replace `"39"` / `"105"` if they differ.
+
+---
+
+## 5. Pull models, point clients
 
 ```bash
 docker exec -it yardmaster-ollama ollama pull qwen4:12b
-docker exec -it yardmaster-ollama ollama pull qwen4:72b       # fits easily in 128 GB
+docker exec -it yardmaster-ollama ollama pull qwen4:72b        # fits easily in 128 GB
 
-# through Yardmaster (host networking -> port 11434 on the Framework's LAN IP):
-curl http://<framework-ip>:11434/api/chat -d '{
-  "model": "qwen4:12b",
-  "messages": [{"role":"user","content":"one sentence on unified memory"}]
-}'
+# through the Yardmaster proxy, from any LAN machine:
+curl http://<framework-ip>:11435/api/chat -d '{"model":"qwen4:12b","messages":[{"role":"user","content":"hi"}]}'
+# or OpenAI-style:
+curl http://<framework-ip>:11435/v1/chat/completions -H 'content-type: application/json' \
+  -d '{"model":"qwen4:12b","messages":[{"role":"user","content":"hi"}]}'
 ```
 
-Any Ollama or OpenAI-compatible client on the LAN can now target
-`http://<framework-ip>:11434` (or `:1234/v1`) unchanged.
+If the proxy returns `502` (no routable engine — [#47](https://github.com/pakgrou-porg/yardmaster/issues/47)),
+point clients at `http://<framework-ip>:11434` (add `- "11434:11434"` to the
+`ollama` service's `ports`) until `dataplane` mode lands.
 
 ---
 
-## 5. Add routing config (optional, and once the data plane lands)
+## 6. The Console
 
-Create `/etc/yardmaster/yardmaster.toml`, uncomment the bind mount in the stack
-(`:ro,Z`), redeploy. Start from
-[`../deploy/portainer/yardmaster.toml.example`](../deploy/portainer/yardmaster.toml.example):
-point a `[providers.local_ollama]` at `http://127.0.0.1:11435` and define your
-routes / tiers per [routing.md](routing.md) and [plan-execute.md](plan-execute.md).
-Validate before redeploying:
+Open **`http://127.0.0.1:8770`** on the Framework (or tunnel it — do not expose
+to the LAN without auth).
 
-```bash
-docker run --rm -v /etc/yardmaster/yardmaster.toml:/config/yardmaster.toml:ro,Z \
-  --entrypoint /opt/yardmaster/bin/yardmaster-dataplane \
-  yardmaster:proxy-local dry-run --config /config/yardmaster.toml
-```
-
-(The `dry-run` subcommand exists once the Rust data plane is in the image — #36.)
+- **Config** — paste/edit `yardmaster.toml`, **Validate**, **Save**. Saves to
+  the bind-mounted file if writable, else the data-dir copy.
+- **Backends** — live up/down + latency + model list for `local_ollama`,
+  `asus_util`, `susa`, … This is your "is Yardmaster seeing the backends" view
+  today.
+- **Metrics** — empty until the data plane writes events; the schema is in
+  place.
+- **Agent** — the embedded DeepSeek Harness Web UI (see next).
 
 ---
 
-## 6. Confirm the GPU is doing the work
+## 7. DeepSeek Harness, routed through Yardmaster
+
+Until the `dsh-yardmaster` adapter has a data plane to talk to, run `dsh` with
+its **built-in OpenAI adapter pointed at the Yardmaster proxy**, so Yardmaster
+still does the placement/failover across your Ollama node(s):
 
 ```bash
-# GPU visible to ROCm inside the engine container:
+# on the Framework
+npx @deepseek-ai/dsh@0.1.2-rc.1 web --no-open \
+  --set llm.openai.baseURL=http://127.0.0.1:11435/v1 \
+  --set llm.openai.apiKey=sk-unused \
+  --set agent.defaultModel.provider=openai \
+  --set agent.defaultModel.model=qwen4:12b
+# -> http://127.0.0.1:3080  ->  shows up in the Console's Agent tab
+```
+
+(Exact `--set` keys depend on the pinned dsh version; `--dump-config` lists
+them. When `YM_DATAPLANE_MODE=dataplane` exists, switch to
+`dsh --profile yardmaster-web` and the adapter handles tiers + correlation.)
+
+---
+
+## 8. Confirm the GPU is working
+
+```bash
 docker exec -it yardmaster-ollama rocminfo | grep -i 'gfx1151\|Marketing Name'
-
-# model loaded on GPU, not CPU:
-docker exec -it yardmaster-ollama ollama ps      # look for "100% GPU"
-
-# live utilisation on the host:
-sudo dnf install -y amdgpu_top && amdgpu_top      # or: radeontop
+docker exec -it yardmaster-ollama ollama ps        # want "100% GPU"
+sudo dnf install -y amdgpu_top && amdgpu_top
 ```
-
-If `ollama ps` shows `100% CPU`, the model did not offload — see Troubleshooting.
 
 ---
 
-## 7. Tuning for 128 GB unified memory
+## 9. Tuning for 128 GB
 
-Set on the `ollama` service (the stack has sane defaults):
+Set on the `ollama` service (defaults in the stack are sane):
 
 | Variable | Suggested | Why |
 | --- | --- | --- |
-| `OLLAMA_KEEP_ALIVE` | `30m` or `-1` | keep big models resident; you have the RAM |
-| `OLLAMA_MAX_LOADED_MODELS` | `3` | a planner + a worker + a judge tier at once |
-| `OLLAMA_NUM_PARALLEL` | `4` | Yardmaster fans subagents out; let the engine batch |
+| `OLLAMA_KEEP_ALIVE` | `30m` or `-1` | keep big models resident |
+| `OLLAMA_MAX_LOADED_MODELS` | `3` | a planner + worker + judge tier hot at once |
+| `OLLAMA_NUM_PARALLEL` | `4` | let the engine batch concurrent requests |
 | `OLLAMA_FLASH_ATTENTION` | `1` | faster, less memory for long context |
-| `OLLAMA_KV_CACHE_TYPE` | `q8_0` (optional) | big context windows without a big cache |
-
-With the router in front, prefer a `plan_execute` route: a 70B planner tier and
-a 12B–14B worker tier both stay hot in memory, and Yardmaster picks per turn.
+| `OLLAMA_KV_CACHE_TYPE` | `q8_0` (optional) | big context without a big cache |
 
 ---
 
-## 8. Troubleshooting
+## 10. Troubleshooting
 
 | Symptom | Fix |
 | --- | --- |
-| `ollama ps` shows `100% CPU`; logs say "no compatible GPUs" | Set `HSA_OVERRIDE_GFX_VERSION: "11.5.1"` on the `ollama` service and restart. If still failing, try `"11.0.0"`. |
-| ROCm sees only a few GB of VRAM | Raise the BIOS UMA / iGPU memory carve-out (section 1). |
-| `permission denied` on `/dev/kfd` | `sudo setsebool -P container_use_devices on`; confirm `group_add: [video, render]` maps to real GIDs (section 2.4). |
-| `rocminfo` in the container errors on a syscall | Uncomment `security_opt: [seccomp=unconfined]` on the `ollama` service. |
-| Other LAN machines cannot reach `:11434` | firewalld (section 2.3); confirm `yardmaster` is `network_mode: host` and bound to the LAN interface. |
-| SELinux `AVC` denials in `ausearch` for a bind mount | add `:Z` (or `:z`) to that mount in the stack. |
-| Portainer build fails in the `rust-build` stage | Expected until [#36](https://github.com/pakgrou-porg/yardmaster/issues/36); the stack uses `target: runtime-proxy` which skips it. If you edited the target, revert. |
-| Model loads but is very slow | Check `amdgpu_top` for VRAM spillover to GTT; lower the quant or raise the BIOS carve-out. Vulkan (`ollama` Vulkan backend or a `llama.cpp` Vulkan container) is a reliable fallback on Strix Halo. |
+| `ollama ps` shows `100% CPU` / "no compatible GPUs" | set `HSA_OVERRIDE_GFX_VERSION: "11.5.1"` on `ollama`, redeploy; try `"11.0.0"` if needed |
+| ROCm sees only a few GB VRAM | raise the BIOS UMA carve-out (§1) |
+| `permission denied` on `/dev/kfd` | `sudo setsebool -P container_use_devices on`; fix `group_add` GIDs |
+| `rocminfo` errors on a syscall | uncomment `security_opt: [seccomp=unconfined]` on `ollama` |
+| proxy `:11435` returns `502` | no routable engine yet ([#47](https://github.com/pakgrou-porg/yardmaster/issues/47)) — use `:11434` direct meanwhile |
+| LAN clients cannot reach `:11435` | firewalld (§2); confirm the `ollama` service publishes `11435:11435` |
+| SELinux `AVC` denial on a bind mount | add `:Z` (or `:z`) to that mount (the stack already has it on `yardmaster.toml`) |
+| Portainer build fails in `rust-build` | expected until [#36](https://github.com/pakgrou-porg/yardmaster/issues/36) — the stack uses `target: runtime-proxy`, which skips it; don't change the target |
+| "container name already in use" on redeploy | `docker rm -f yardmaster yardmaster-ollama yardmaster-console yardmaster-init` then redeploy (Portainer + explicit `container_name`) |
 
 ---
 
-## 9. Add a second node
+## 11. Second node
 
-Deploy the same stack on another machine on the LAN (any OS Yardmaster
-supports). Pair them with the six-digit PIN — until the headless pairing helper
-lands ([#46](https://github.com/pakgrou-porg/yardmaster/issues/46)) use the
-bundled TUI:
+Deploy the same stack on another LAN machine. Pair with the PIN via the bundled
+TUI until the headless helper lands
+([#46](https://github.com/pakgrou-porg/yardmaster/issues/46)):
 
 ```bash
 docker exec -it yardmaster /opt/yardmaster/bin/nvpair-tui
 ```
 
-Read the PIN on one node, enter it on the other. The mTLS cluster forms and the
-`yardmaster-data` volume on each node persists the identity across restarts.
-Yardmaster then places requests across both nodes' engines.
+Read the PIN on one, enter it on the other. `yardmaster-data` persists the mTLS
+identity across restarts.
 
-## 10. Backups
+## 12. Backups
 
 ```bash
 docker run --rm -v yardmaster-data:/data -v "$PWD":/backup busybox \
   tar czf /backup/yardmaster-data.tgz -C /data .
 ```
 
-Losing `yardmaster-data` means re-pairing. The Ollama model volume is just a
-cache — re-pull if lost.
+Losing `yardmaster-data` means re-pairing. The model volume is a cache.

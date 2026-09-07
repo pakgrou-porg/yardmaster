@@ -32,6 +32,24 @@ else
   echo "yardmaster-entrypoint: no yardmaster.toml — running in PAIR-compatible zero-config mode"
 fi
 
+# If a local engine URL is given, wait (bounded) for it to answer before we
+# start the broker, so the broker's auto-advertise loop finds it on its first
+# pass instead of a cycle later. Also a clear log line for debugging.
+if [ -n "${YM_LOCAL_ENGINE_URL:-}" ]; then
+  echo "yardmaster-entrypoint: waiting for local engine at ${YM_LOCAL_ENGINE_URL}"
+  i=0
+  until curl -fsS -m 2 "${YM_LOCAL_ENGINE_URL}/api/tags" >/dev/null 2>&1 \
+     || curl -fsS -m 2 "${YM_LOCAL_ENGINE_URL}/v1/models" >/dev/null 2>&1; do
+    i=$((i + 1))
+    if [ "$i" -ge 30 ]; then
+      echo "yardmaster-entrypoint: local engine still not answering after ~60s; continuing anyway" >&2
+      break
+    fi
+    sleep 2
+  done
+  [ "$i" -lt 30 ] && echo "yardmaster-entrypoint: local engine is up"
+fi
+
 # Optional in-container agent: dsh web on loopback only, in a subshell whose
 # environment has every *_API_KEY / *_TOKEN / *_SECRET removed (spec 1.10 /
 # ADR-0016). The broker below keeps the full environment so the data plane can

@@ -82,7 +82,11 @@ ENV YM_DATA_DIR=/data \
     XDG_CONFIG_HOME=/data \
     NVPAIR_LOG_LEVEL=info \
     YM_DATAPLANE_MODE=proxy \
-    YM_HEALTHCHECK_URL=http://127.0.0.1:11434/api/tags
+    YM_LOCAL_ENGINE_URL="" \
+    YM_HEALTHCHECK_URL=http://127.0.0.1:11435/api/tags
+# ^ the headless ollama-proxy listens on 11435 by default (nothing calls
+#   set-port without a UI); the engine sits on 11434. See
+#   docs/deployment-docker.md "The port model".
 VOLUME ["/data"]
 
 # Ollama ingress, LM Studio / OpenAI ingress, Anthropic + /health + /metrics,

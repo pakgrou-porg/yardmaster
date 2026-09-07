@@ -1,56 +1,46 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 Karl Miller
 # SPDX-License-Identifier: Apache-2.0
 #
-# Yardmaster + ROCm Ollama on a Framework Desktop (AMD Ryzen AI Max+ 395 /
-# "Strix Halo", Radeon 8060S iGPU, 128 GB unified memory), Fedora 44.
+# Yardmaster + ROCm Ollama + Console on a Framework Desktop
+# (AMD Ryzen AI Max+ 395 / "Strix Halo", Radeon 8060S iGPU, 128 GB unified
+# memory), Fedora 44.
 #
-# Read docs/deployment-framework-strix-halo.md first — it covers the Fedora
-# prerequisites (Docker CE vs podman, SELinux, firewalld) and the BIOS iGPU
-# memory setting that ROCm needs to see a large VRAM pool.
+# GPU-tuned variant of deploy/portainer/yardmaster-node.stack.yml. Read
+# docs/deployment-framework-strix-halo.md first (BIOS iGPU-memory carve-out,
+# `setsebool container_use_devices`, firewalld, the gfx1151 override).
 #
-# Deploy in Portainer: Stacks -> Add stack -> Repository, compose path
-#   deploy/portainer/examples/framework-strix-halo.stack.yml
-# or paste this file into the web editor. Set variables in the stack's
-# "Environment variables" panel (see deploy/portainer/.env.example).
+# Topology: `ollama` owns the network namespace; `yardmaster` (broker + proxy)
+# and `yardmaster-console` share it. The broker's auto-advertise probes
+# 127.0.0.1:11434, so the engine sits there and the proxy on 11435.
 #
-# The `yardmaster` service builds from source with `target: runtime-proxy`,
-# which is the image that builds today (Go workers only; the Rust data plane
-# lands with issue #36). It runs a PAIR-style router on 11434 / 1234.
+# Point LAN clients at http://<framework-ip>:11435
+# Open the Console at    http://127.0.0.1:8770  (on the Framework itself)
 
 services:
-  # ----- ROCm Ollama: the engine, GPU-accelerated on the 8060S ---------------
   ollama:
     image: docker.io/ollama/ollama:rocm
     container_name: yardmaster-ollama
     restart: unless-stopped
-    # ROCm device access. On Fedora, confirm the container can use them:
-    #   getent group render video      # note the GIDs
-    # and if `group_add` by name does not work, replace with those numbers.
     devices:
       - /dev/kfd
       - /dev/dri
     group_add:
-      - video
-      - render
-    # Some Fedora + ROCm combos need a looser seccomp profile for HIP. Uncomment
-    # if `rocminfo` inside the container fails with a permission error.
-    # security_opt:
-    #   - seccomp=unconfined
+      - "39"        # video  -- verify: getent group video render
+      - "105"       # render
     ipc: host
-    ports:
-      - "127.0.0.1:11435:11434"   # loopback only; Yardmaster fronts the LAN
+    # security_opt: ["seccomp=unconfined"]   # only if rocminfo fails on a syscall
     environment:
-      # gfx1151 (8060S) is supported by ROCm >= 6.4 without an override. If model
-      # loads fail with "no compatible GPUs", set this and restart:
-      # HSA_OVERRIDE_GFX_VERSION: "11.5.1"
-      OLLAMA_HOST: "0.0.0.0:11434"
-      # 128 GB unified memory: keep models hot and allow real concurrency.
+      OLLAMA_HOST: "127.0.0.1:11434"          # loopback in the shared namespace
       OLLAMA_KEEP_ALIVE: "30m"
       OLLAMA_MAX_LOADED_MODELS: "3"
       OLLAMA_NUM_PARALLEL: "4"
       OLLAMA_FLASH_ATTENTION: "1"
-      # Optional: quantized KV cache trades a little quality for a lot of context.
-      # OLLAMA_KV_CACHE_TYPE: "q8_0"
+      # HSA_OVERRIDE_GFX_VERSION: "11.5.1"    # set if model loads fall back to CPU
+    ports:
+      - "11435:11435"                         # Yardmaster proxy -> your LAN
+      - "127.0.0.1:8770:8770"                 # Console -> Framework loopback only
+      # - "11434:11434"                       # Ollama direct, if you want it too
+      # - "127.0.0.1:3080:3080"               # dsh Web UI, if run in-namespace
     volumes:
       - ollama-models:/root/.ollama
     healthcheck:
@@ -59,35 +49,55 @@ services:
       timeout: 10s
       retries: 5
 
-  # ----- Yardmaster: the router --------------------------------------------
+  yardmaster-init:
+    image: alpine:latest
+    container_name: yardmaster-init
+    command: sh -c "chown -R 10001:10001 /data"
+    volumes:
+      - yardmaster-data:/data
+
   yardmaster:
     build:
-      context: ../../..
+      context: "https://github.com/pakgrou-porg/yardmaster.git#main"
       dockerfile: docker/Dockerfile
       target: runtime-proxy
     image: yardmaster:proxy-local
     container_name: yardmaster
     restart: unless-stopped
-    network_mode: host
+    network_mode: "service:ollama"
     depends_on:
-      ollama:
-        condition: service_healthy
+      yardmaster-init: { condition: service_completed_successfully }
+      ollama: { condition: service_healthy }
     environment:
-      NVPAIR_LOG_LEVEL: ${NVPAIR_LOG_LEVEL:-info}
+      NVPAIR_LOG_LEVEL: info
       YM_DATAPLANE_MODE: proxy
-      YM_HEALTHCHECK_URL: http://127.0.0.1:11434/api/tags
-      # Set these only if you also enable remote egress in yardmaster.toml.
-      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
-      VENICE_API_KEY: ${VENICE_API_KEY:-}
-      KIE_API_KEY: ${KIE_API_KEY:-}
+      YM_LOCAL_ENGINE_URL: http://127.0.0.1:11434
+      YM_HEALTHCHECK_URL: http://127.0.0.1:11435/api/tags
     volumes:
       - yardmaster-data:/data
-      # To pin a yardmaster.toml: uncomment, set an absolute host path, keep the
-      # :ro,Z suffix so SELinux relabels it for the container.
-      # - /etc/yardmaster/yardmaster.toml:/config/yardmaster.toml:ro,Z
+
+  yardmaster-console:
+    build:
+      context: "https://github.com/pakgrou-porg/yardmaster.git#main"
+      dockerfile: packages/yardmaster-console/Dockerfile
+    image: yardmaster-console:local
+    container_name: yardmaster-console
+    restart: unless-stopped
+    network_mode: "service:ollama"
+    depends_on:
+      yardmaster: { condition: service_started }
+    environment:
+      YM_CONSOLE_PORT: "8770"
+      YM_CONSOLE_BIND: 0.0.0.0
+      YM_LOCAL_ENGINE_URL: http://127.0.0.1:11434
+      YM_AGENT_URL: http://127.0.0.1:3080
+      YM_CONFIG_PATH: /config/yardmaster.toml
+      YM_CONFIG_FALLBACK: "/data/Nvidia Corporation/Personal AI Router/yardmaster.toml"
+      YM_METRICS_DB: "/data/Nvidia Corporation/Personal AI Router/yardmaster-metrics.db"
+    volumes:
+      - yardmaster-data:/data
+      - /etc/yardmaster/yardmaster.toml:/config/yardmaster.toml:ro,Z
 
 volumes:
-  yardmaster-data:
-    name: yardmaster-data
-  ollama-models:
-    name: yardmaster-ollama-models
+  ollama-models: { name: yardmaster-ollama-models }
+  yardmaster-data: { name: yardmaster-data }

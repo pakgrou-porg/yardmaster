@@ -1,44 +1,66 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 Karl Miller
 # SPDX-License-Identifier: Apache-2.0
 #
-# Bridge-network variant — for Docker Swarm, or hosts where network_mode: host
-# is not acceptable.
+# Bridge-network variant — for Docker Swarm, or hosts where a shared network
+# namespace / host networking is not acceptable.
 #
-# Trade-offs you accept with this variant:
-#   * mDNS discovery does NOT cross the bridge. Automatic node discovery and
-#     LAN endpoint discovery will not work. Use manual nodes / explicit
-#     yardmaster.toml targets, and pair by entering the peer's address by hand.
-#   * The container's published ports are reachable on the host's LAN IP, so an
-#     existing client can still point at http://<host>:11434 etc.
-#   * `[discovery] lan_scan` must stay false (it would probe the container's
-#     own bridge subnet, which is not your LAN).
+# Trade-offs you accept here:
+#   * The broker's auto-advertise loop probes `127.0.0.1:11434` for the local
+#     engine. On a bridge the engine is at `ollama:11434`, NOT loopback, so the
+#     proxy is NOT auto-wired to it. You must add the engine as a manual node or
+#     wait for YM_DATAPLANE_MODE=dataplane (issue #47 / #26).
+#   * mDNS discovery does not cross the bridge — no automatic node/endpoint
+#     discovery. Use manual nodes and pair by address.
+#   * Keep `[discovery] lan_scan = false` (the container subnet is not your LAN).
+#
+# For a single box, prefer deploy/portainer/yardmaster-node.stack.yml.
 
 services:
+  ollama:
+    image: docker.io/ollama/ollama:latest
+    restart: unless-stopped
+    environment:
+      OLLAMA_HOST: "0.0.0.0:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "ls"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
   yardmaster:
-    image: ${YM_IMAGE:-ghcr.io/pakgrou-porg/yardmaster:latest}
+    build:
+      context: "https://github.com/pakgrou-porg/yardmaster.git#main"
+      dockerfile: docker/Dockerfile
+      target: runtime-proxy
+    image: yardmaster:proxy-local
     restart: unless-stopped
     ports:
-      - "${YM_OLLAMA_PORT:-11434}:11434"
-      - "${YM_OPENAI_PORT:-1234}:1234"
-      - "${YM_ANTHROPIC_PORT:-4000}:4000"
+      - "${YM_PROXY_PORT:-11435}:11435"
     environment:
-      NVPAIR_LOG_LEVEL: ${NVPAIR_LOG_LEVEL:-info}
-      YM_DATAPLANE_MODE: ${YM_DATAPLANE_MODE:-proxy}
-      YM_HEALTHCHECK_URL: http://127.0.0.1:11434/api/tags
-      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
-      VENICE_API_KEY: ${VENICE_API_KEY:-}
-      KIE_API_KEY: ${KIE_API_KEY:-}
+      NVPAIR_LOG_LEVEL: info
+      YM_DATAPLANE_MODE: proxy
+      YM_HEALTHCHECK_URL: http://127.0.0.1:11435/api/tags
     volumes:
       - yardmaster-data:/data
-      - type: bind
-        source: ${YM_CONFIG_FILE:-/dev/null}
-        target: /config/yardmaster.toml
-        read_only: true
-    # Swarm: host-mode published ports keep the client's source IP.
-    # deploy:
-    #   replicas: 1
-    #   endpoint_mode: dnsrr
+
+  yardmaster-console:
+    build:
+      context: "https://github.com/pakgrou-porg/yardmaster.git#main"
+      dockerfile: packages/yardmaster-console/Dockerfile
+    image: yardmaster-console:local
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${YM_CONSOLE_PORT:-8770}:8770"
+    environment:
+      YM_CONSOLE_BIND: 0.0.0.0
+      YM_LOCAL_ENGINE_URL: http://ollama:11434
+      YM_AGENT_URL: ${YM_AGENT_URL:-http://127.0.0.1:3080}
+      YM_METRICS_DB: "/data/Nvidia Corporation/Personal AI Router/yardmaster-metrics.db"
+    volumes:
+      - yardmaster-data:/data
 
 volumes:
-  yardmaster-data:
-    name: yardmaster-data
+  ollama-models: { name: yardmaster-ollama-models }
+  yardmaster-data: { name: yardmaster-data }
