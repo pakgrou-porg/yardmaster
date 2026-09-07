@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # NNNN. Title
 
-- Status: proposed | accepted | superseded by [ADR-XXXX](XXXX-*.md)
+- Status: proposed | accepted | superseded by ADR-XXXX
 - Date: YYYY-MM-DD
 - Deciders: @pakgrou-porg
 

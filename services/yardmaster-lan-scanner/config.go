@@ -41,8 +41,16 @@ func DefaultConfig() Config {
 // ProbeTimeout is fixed by spec 1.7: 500 ms per GET.
 const ProbeTimeout = 500 * time.Millisecond
 
-// probesPerHost is fixed by spec 1.7: exactly GET /v1/models and GET /api/tags.
+// probePaths is fixed by spec 1.7: exactly GET /v1/models and GET /api/tags,
+// nothing else.
 var probePaths = []string{"/v1/models", "/api/tags"}
+
+// ProbeSpec returns the two paths and the per-GET timeout a single host probe
+// is allowed to use. The prober (tracked in repo issue #29) must not exceed
+// this: two GETs per host per interval, 500 ms each.
+func ProbeSpec() (paths []string, timeout time.Duration) {
+	return probePaths, ProbeTimeout
+}
 
 // Validate rejects a configuration that would probe outside private space.
 // A public IP or CIDR in Subnets is fatal (spec section 4).
