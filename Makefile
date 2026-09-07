@@ -66,3 +66,13 @@ docs-check: ## ADR index + validate fenced TOML in docs
 .PHONY: build
 build: ## Build everything and stage into services/build/bin (see scripts/build.sh)
 	./scripts/build.sh
+
+.PHONY: docker-build
+docker-build: ## Build the headless node image (docker/Dockerfile)
+	docker build -f docker/Dockerfile -t yardmaster:dev .
+
+.PHONY: docker-lint
+docker-lint: ## Validate the Portainer stack files and the entrypoint
+	@for f in deploy/portainer/*.stack.yml; do \
+	  echo "  $$f"; YM_CONFIG_FILE=/dev/null docker compose -f "$$f" config -q; done
+	shellcheck docker/entrypoint.sh

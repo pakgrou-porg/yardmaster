@@ -33,3 +33,4 @@ and that every row points at a file that exists.
 | [0019](0019-pair-default-placement-equivalence.md) | placement.policy = "pair_default" is byte-for-byte PAIR scheduler ordering | accepted |
 | [0020](0020-repo-owner-and-visibility.md) | Repository is public under pakgrou-porg | accepted |
 | [0021](0021-dsh-version-pin.md) | dsh version pin: installable 0.1.2-rc.1, upstream SHA declares 0.1.3-alpha.1 | accepted |
+| [0022](0022-headless-container-deployment.md) | Headless container deployment: one node per host, host networking, engines out of the container | accepted |

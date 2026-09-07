@@ -1,0 +1,72 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Karl Miller
+# SPDX-License-Identifier: Apache-2.0
+#
+# Yardmaster node + a sibling Ollama engine, both on one Docker host.
+#
+# Yardmaster does NOT install or supervise engines in a container (the
+# engine-manager's install path wants host access it should not have here). So
+# the engine runs as its own service and Yardmaster reaches it as a promoted LAN
+# target or a manual node.
+#
+# With host networking, Ollama's own 11434 would collide with Yardmaster's
+# ingress. This stack puts Ollama on an internal bridge on 11435 and points
+# Yardmaster at it via yardmaster.toml (see the example below the services).
+
+services:
+  ollama:
+    image: docker.io/ollama/ollama:latest
+    container_name: yardmaster-ollama
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:11435:11434"   # loopback-only; Yardmaster fronts the LAN
+    volumes:
+      - ollama-models:/root/.ollama
+    # GPU: uncomment on an NVIDIA host with the container toolkit installed.
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+  yardmaster:
+    image: ${YM_IMAGE:-ghcr.io/pakgrou-porg/yardmaster:latest}
+    container_name: yardmaster
+    restart: unless-stopped
+    network_mode: host
+    depends_on: [ollama]
+    environment:
+      NVPAIR_LOG_LEVEL: ${NVPAIR_LOG_LEVEL:-info}
+      YM_DATAPLANE_MODE: ${YM_DATAPLANE_MODE:-proxy}
+      YM_HEALTHCHECK_URL: http://127.0.0.1:11434/api/tags
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      VENICE_API_KEY: ${VENICE_API_KEY:-}
+      KIE_API_KEY: ${KIE_API_KEY:-}
+    volumes:
+      - yardmaster-data:/data
+      - type: bind
+        source: ${YM_CONFIG_FILE:-/dev/null}
+        target: /config/yardmaster.toml
+        read_only: true
+
+# Point Yardmaster at the sibling engine with a yardmaster.toml like:
+#
+#   schema_version = 1
+#   [targets]
+#   [discovery]
+#   lan_scan = false
+#   [providers.local_ollama]
+#   base_url = "http://127.0.0.1:11435"
+#   [targets.qwen]
+#   id = "qwen4:12b"
+#   locality = "lan"
+#   provider = "local_ollama"
+#
+# then: docker exec yardmaster-ollama ollama pull qwen4:12b
+
+volumes:
+  yardmaster-data:
+    name: yardmaster-data
+  ollama-models:
+    name: yardmaster-ollama-models

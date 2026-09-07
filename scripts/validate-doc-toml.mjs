@@ -81,14 +81,23 @@ function scanMarkdown(dir) {
 }
 
 scanMarkdown(DOCS);
-try {
-  for (const f of readdirSync(EXAMPLES)) {
-    if (!f.endsWith(".toml")) continue;
-    blocks++;
-    errors.push(...lexCheck(readFileSync(join(EXAMPLES, f), "utf8"), f));
+
+const TOML_FILE_DIRS = [
+  EXAMPLES,
+  new URL("../deploy/portainer/", import.meta.url).pathname,
+];
+for (const dir of TOML_FILE_DIRS) {
+  let entries;
+  try {
+    entries = readdirSync(dir);
+  } catch {
+    continue; // directory may not exist yet
   }
-} catch {
-  /* examples/ may not exist yet */
+  for (const f of entries) {
+    if (!/\.toml(\.example)?$/.test(f)) continue;
+    blocks++;
+    errors.push(...lexCheck(readFileSync(join(dir, f), "utf8"), f));
+  }
 }
 
 if (errors.length) {

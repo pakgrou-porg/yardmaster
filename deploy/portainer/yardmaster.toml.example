@@ -1,0 +1,49 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Karl Miller
+# SPDX-License-Identifier: Apache-2.0
+#
+# Example yardmaster.toml for a containerized node. Bind-mount this at
+# /config/yardmaster.toml (set YM_CONFIG_FILE to its host path).
+#
+# Validate before deploying:
+#   docker run --rm -v "$PWD/yardmaster.toml:/config/yardmaster.toml:ro" \
+#     --entrypoint /opt/yardmaster/bin/yardmaster-dataplane \
+#     ghcr.io/pakgrou-porg/yardmaster:latest dry-run --config /config/yardmaster.toml
+
+schema_version = 1
+
+[ingress]
+ollama_port = 11434
+openai_port = 1234
+anthropic_port = 4000
+
+[placement]
+policy = "pair_default"
+
+[egress]
+allow_remote = false     # keep prompts on the LAN by default
+allow_lan = true
+
+[discovery]
+# In a bridge-network container, leave lan_scan off: the container's subnet is
+# not your LAN. With host networking you may enable it.
+lan_scan = false
+
+[metrics]
+retention_days = 30
+prometheus = true
+
+[targets]
+
+# --- reach an engine running elsewhere (sibling container / another host) ---
+[providers.local_ollama]
+base_url = "http://127.0.0.1:11435"   # e.g. the yardmaster-node-with-ollama stack
+
+[targets.qwen]
+id = "qwen4:12b"
+locality = "lan"
+provider = "local_ollama"
+
+[routes.default]
+id = "qwen4:12b"
+type = "passthrough"
+target = "qwen"

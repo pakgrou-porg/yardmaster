@@ -1,0 +1,44 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Karl Miller
+# SPDX-License-Identifier: Apache-2.0
+#
+# Bridge-network variant — for Docker Swarm, or hosts where network_mode: host
+# is not acceptable.
+#
+# Trade-offs you accept with this variant:
+#   * mDNS discovery does NOT cross the bridge. Automatic node discovery and
+#     LAN endpoint discovery will not work. Use manual nodes / explicit
+#     yardmaster.toml targets, and pair by entering the peer's address by hand.
+#   * The container's published ports are reachable on the host's LAN IP, so an
+#     existing client can still point at http://<host>:11434 etc.
+#   * `[discovery] lan_scan` must stay false (it would probe the container's
+#     own bridge subnet, which is not your LAN).
+
+services:
+  yardmaster:
+    image: ${YM_IMAGE:-ghcr.io/pakgrou-porg/yardmaster:latest}
+    restart: unless-stopped
+    ports:
+      - "${YM_OLLAMA_PORT:-11434}:11434"
+      - "${YM_OPENAI_PORT:-1234}:1234"
+      - "${YM_ANTHROPIC_PORT:-4000}:4000"
+    environment:
+      NVPAIR_LOG_LEVEL: ${NVPAIR_LOG_LEVEL:-info}
+      YM_DATAPLANE_MODE: ${YM_DATAPLANE_MODE:-proxy}
+      YM_HEALTHCHECK_URL: http://127.0.0.1:11434/api/tags
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      VENICE_API_KEY: ${VENICE_API_KEY:-}
+      KIE_API_KEY: ${KIE_API_KEY:-}
+    volumes:
+      - yardmaster-data:/data
+      - type: bind
+        source: ${YM_CONFIG_FILE:-/dev/null}
+        target: /config/yardmaster.toml
+        read_only: true
+    # Swarm: host-mode published ports keep the client's source IP.
+    # deploy:
+    #   replicas: 1
+    #   endpoint_mode: dnsrr
+
+volumes:
+  yardmaster-data:
+    name: yardmaster-data

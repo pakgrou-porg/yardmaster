@@ -122,6 +122,7 @@ steps are in [docs/migrating-from-pair.md](docs/migrating-from-pair.md).
 | [docs/metrics.md](docs/metrics.md) | Event schema, Prometheus metrics, OTLP span tree, `metrics.*` JSON-RPC, report format, retention |
 | [docs/harness.md](docs/harness.md) | The DeepSeek Harness plugin, its extension points, the default tier policy, the two profiles, the Agent tab, the safety boundary |
 | [docs/security.md](docs/security.md) | Trust boundaries, what changed vs PAIR, the egress model, inherited exposures |
+| [docs/deployment-docker.md](docs/deployment-docker.md) | Headless container + Portainer stacks: networking, persistent state, pairing, the agent in a container |
 | [docs/migrating-from-pair.md](docs/migrating-from-pair.md) | Zero-config path, then adding a first route |
 | [docs/migrating-from-switchyard.md](docs/migrating-from-switchyard.md) | Mapping URL targets to `locality = "remote"`, converting a vLLM target into a cluster node |
 | [docs/decisions/](docs/decisions/) | Architecture Decision Records |

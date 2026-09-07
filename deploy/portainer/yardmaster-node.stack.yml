@@ -1,0 +1,65 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Karl Miller
+# SPDX-License-Identifier: Apache-2.0
+#
+# Yardmaster node — Portainer stack (single node per Docker host).
+#
+# This is the real deployment model: run this stack on each machine you want in
+# the cluster, then pair them with the six-digit PIN. Host networking is
+# required for mDNS discovery and for taking over ports 11434 / 1234, exactly as
+# a native install does.
+#
+# Portainer:
+#   Stacks -> Add stack -> "Repository" (this repo, path deploy/portainer/
+#   yardmaster-node.stack.yml) or paste this file in the web editor.
+#   Set the environment variables below in the Portainer "Environment variables"
+#   section (or upload deploy/portainer/.env.example as an env file).
+#
+# network_mode: host is supported by Portainer on a standalone Docker host. It is
+# NOT supported under Docker Swarm — use yardmaster-bridge.stack.yml there and
+# accept that mDNS discovery will not cross the bridge.
+
+services:
+  yardmaster:
+    image: ${YM_IMAGE:-ghcr.io/pakgrou-porg/yardmaster:latest}
+    # To build from source instead of pulling an image, comment out `image:`
+    # above and uncomment:
+    # build:
+    #   context: ..
+    #   dockerfile: docker/Dockerfile
+    container_name: yardmaster
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      NVPAIR_LOG_LEVEL: ${NVPAIR_LOG_LEVEL:-info}
+      # proxy = works today; dataplane = after issue #26 lands.
+      YM_DATAPLANE_MODE: ${YM_DATAPLANE_MODE:-proxy}
+      # Set to 1 to also run the DeepSeek Harness agent on 127.0.0.1:3080.
+      YM_AGENT: ${YM_AGENT:-0}
+      YM_HEALTHCHECK_URL: ${YM_HEALTHCHECK_URL:-http://127.0.0.1:11434/api/tags}
+      # Provider API keys — passed through to the data plane, never written to
+      # yardmaster.toml. Leave unset unless you also enable remote egress.
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      VENICE_API_KEY: ${VENICE_API_KEY:-}
+      KIE_API_KEY: ${KIE_API_KEY:-}
+    volumes:
+      # Cluster identity, certificates, pin store, yardmaster.toml, metrics DB.
+      # Back this up — losing it drops the node out of the mTLS cluster.
+      - yardmaster-data:/data
+      # Optional: manage yardmaster.toml as a read-only bind mount / Portainer
+      # config instead of editing it inside the volume.
+      - type: bind
+        source: ${YM_CONFIG_FILE:-/dev/null}
+        target: /config/yardmaster.toml
+        read_only: true
+    # Uncomment for NVIDIA GPU access if you also run an engine in this stack.
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+volumes:
+  yardmaster-data:
+    name: yardmaster-data
