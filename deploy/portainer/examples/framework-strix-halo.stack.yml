@@ -96,7 +96,11 @@ services:
       YM_METRICS_DB: "/data/Nvidia Corporation/Personal AI Router/yardmaster-metrics.db"
     volumes:
       - yardmaster-data:/data
-      - /etc/yardmaster/yardmaster.toml:/config/yardmaster.toml:ro,Z
+      # To pin yardmaster.toml from the host: create the file first
+      # (`sudo install -Dm644 /dev/null /etc/yardmaster/yardmaster.toml`), then
+      # uncomment. Keep :ro,Z so SELinux relabels it. If it does not exist,
+      # Docker would create a directory here and the Console read fails.
+      # - /etc/yardmaster/yardmaster.toml:/config/yardmaster.toml:ro,Z
 
 volumes:
   ollama-models: { name: yardmaster-ollama-models }
