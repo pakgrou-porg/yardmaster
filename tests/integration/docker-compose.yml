@@ -1,0 +1,74 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Karl Miller
+# SPDX-License-Identifier: Apache-2.0
+#
+# Integration harness for Yardmaster. Run:
+#   docker compose -f tests/integration/docker-compose.yml up --build \
+#     --abort-on-container-exit --exit-code-from runner
+#
+# Phase 1 (default): two stub engines + the runner's plumbing checks. Green today.
+# Phase 2: add the `full` profile once yardmaster-dataplane builds (#25/#26):
+#   docker compose --profile full -f tests/integration/docker-compose.yml up --build
+name: yardmaster-integration
+
+services:
+  engine-a:
+    build: ./stub-engine
+    environment:
+      NODE_NAME: engine-a
+      PORT: "8080"
+      MODELS: "qwen4:12b,qwen4:72b"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  engine-b:
+    build: ./stub-engine
+    environment:
+      NODE_NAME: engine-b
+      PORT: "8080"
+      MODELS: "qwen4:12b,nemotron-3.5-lightning"
+      FAIL_TIMES: "1"
+      FAIL_STATUS: "404"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  # Phase 2 only. Two Yardmaster nodes fronting one engine each.
+  yardmaster-a:
+    profiles: ["full"]
+    build:
+      context: ../..
+      dockerfile: docker/Dockerfile
+      target: runtime-proxy
+    environment:
+      NVPAIR_LOG_LEVEL: debug
+      YM_DATAPLANE_MODE: proxy
+    depends_on:
+      engine-a: { condition: service_healthy }
+
+  yardmaster-b:
+    profiles: ["full"]
+    build:
+      context: ../..
+      dockerfile: docker/Dockerfile
+      target: runtime-proxy
+    environment:
+      NVPAIR_LOG_LEVEL: debug
+      YM_DATAPLANE_MODE: proxy
+    depends_on:
+      engine-b: { condition: service_healthy }
+
+  runner:
+    build: ./runner
+    environment:
+      ENGINE_A_URL: http://engine-a:8080
+      ENGINE_B_URL: http://engine-b:8080
+      YARDMASTER_A_URL: http://yardmaster-a:1234
+      YARDMASTER_B_URL: http://yardmaster-b:1234
+    depends_on:
+      engine-a: { condition: service_healthy }
+      engine-b: { condition: service_healthy }
