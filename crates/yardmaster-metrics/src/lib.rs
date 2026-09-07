@@ -19,6 +19,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod schema;
+
 /// The metrics event. Field set is frozen by an allowlist test (spec section 4
 /// and 6): adding a field requires updating the allowlist and the schema doc.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
