@@ -160,11 +160,15 @@ jobs:
       - run: node scripts/spdx-check.mjs
       - run: node scripts/adr-index-check.mjs
       - run: node scripts/validate-doc-toml.mjs
-      - name: markdown link check
+      - name: markdown link check (Yardmaster-authored docs only)
         uses: gaurav-nelson/github-action-markdown-link-check@v1
         with:
           use-quiet-mode: 'yes'
           config-file: .github/mlc-config.json
+          # Vendored trees (services/, desktop/) keep upstream's own links and
+          # are not ours to fix; the root README is checked explicitly.
+          folder-path: 'docs, .github'
+          file-path: './README.md, ./AGENTS.md, ./CONTRIBUTING.md, ./SECURITY.md, ./GOVERNANCE.md, ./SUPPORT.md'
       - name: authoritative TOML dry-run (gated on the data plane binary)
         run: |
           if command -v yardmaster-dataplane >/dev/null; then
