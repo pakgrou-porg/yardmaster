@@ -36,6 +36,11 @@ services:
       target: runtime-proxy
     image: yardmaster:proxy-local
     restart: unless-stopped
+    # NOTE: the proxy refuses non-loopback plaintext with 403 (PAIR security
+    # model). On a bridge every request is non-loopback, so publishing 11435
+    # only works for paired cluster peers over mTLS. For plain LAN clients use
+    # the shared-namespace node stack (which runs yardmaster-lan-shim), or add
+    # your own socat sidecar in this container's netns, or use Ollama-direct.
     ports:
       - "${YM_PROXY_PORT:-11435}:11435"
     environment:

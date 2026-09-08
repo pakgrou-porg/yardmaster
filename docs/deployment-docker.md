@@ -49,15 +49,22 @@ otherwise).
 | Port | Who listens | Publish? |
 | --- | --- | --- |
 | `11434` | the engine (Ollama), on loopback in the namespace | optional (`"11434:11434"`) for engine-direct |
-| **`11435`** | the Yardmaster **proxy** — its headless default (nothing calls `set-port` without a UI) | **yes — point clients here** |
+| `11435` | the Yardmaster **proxy** — its headless default | **no** — loopback-only for plaintext (403 otherwise) |
+| `11430` | `yardmaster-lan-shim` (`socat`) → `127.0.0.1:11435` | **yes** — `"11435:11430"`; this is the LAN entry point |
 | `8770` | the Yardmaster **Console** | host-loopback only (`"127.0.0.1:8770:8770"`) |
 | `4000` | the data plane's Anthropic + `/health` + `/metrics` | only meaningful in `dataplane` mode |
 | `14318` | PAIR node telemetry (plaintext) | **never** publish off-host |
 | `3080` | the dsh Web UI, if run in-namespace | host-loopback only |
 
+**The proxy refuses non-loopback plaintext with `403`** (PAIR's security model;
+`docs/security.md`). Only paired cluster peers reach it over the LAN, via mTLS.
+The `yardmaster-lan-shim` sidecar bridges the gap for a plain LAN client: it
+runs in the same namespace, so its forwarded connection originates from
+`127.0.0.1` and the proxy serves it.
+
 Common mistakes: putting the engine on `11435` (collides with the proxy → the
-broker refuses to wire it); expecting the proxy on `11434`; health-checking
-`11434` when the proxy is on `11435`.
+broker refuses to wire it); expecting the proxy on `11434`; publishing the
+proxy port directly and getting `403` from every LAN client.
 
 ## Stacks
 

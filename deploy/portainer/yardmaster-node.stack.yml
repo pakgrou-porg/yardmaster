@@ -12,10 +12,14 @@
 # the broker's stdin open via a FIFO, so no `stdin_open` / `tty` is needed.
 # See docs/decisions/0024-container-sibling-engine-wiring.md.
 #
+# The proxy refuses non-loopback plaintext (403 — PAIR's security model). The
+# `yardmaster-lan-shim` socat sidecar forwards LAN traffic through loopback so
+# the proxy accepts it.
+#
 # Ports (all published on the `ollama` service, which owns the namespace):
-#   11434  Ollama itself (optional to expose; the proxy fronts it)
-#   11435  the Yardmaster ollama-proxy  <-- point clients here
+#   11435 -> shim :11430 -> proxy :11435   <-- point LAN clients here
 #    8770  the Yardmaster Console (loopback-published; widen at your own risk)
+#   11434  Ollama direct (optional; commented out)
 #    3080  the DeepSeek Harness Web UI, if you run it (see docs/deployment-docker.md)
 #
 # CPU-only box: drop the `devices` / `group_add` from `ollama`. GPU box: see
@@ -33,7 +37,7 @@ services:
       OLLAMA_MAX_LOADED_MODELS: "3"
       OLLAMA_NUM_PARALLEL: "4"
     ports:
-      - "11435:11435"                    # the Yardmaster proxy
+      - "11435:11430"                    # LAN -> yardmaster-lan-shim -> loopback proxy
       - "127.0.0.1:8770:8770"            # the Console, host-loopback only
       # - "11434:11434"                  # uncomment for Ollama direct
       # - "127.0.0.1:3080:3080"          # uncomment if you run dsh in-namespace
@@ -71,6 +75,16 @@ services:
       YM_HEALTHCHECK_URL: http://127.0.0.1:11435/api/tags
     volumes:
       - yardmaster-data:/data
+
+  # Loopback -> LAN bridge for the proxy (see the header comment).
+  yardmaster-lan-shim:
+    image: alpine/socat:latest
+    container_name: yardmaster-lan-shim
+    restart: unless-stopped
+    network_mode: "service:ollama"
+    depends_on:
+      yardmaster: { condition: service_started }
+    command: ["-d", "TCP-LISTEN:11430,fork,reuseaddr", "TCP:127.0.0.1:11435"]
 
   yardmaster-console:
     build:

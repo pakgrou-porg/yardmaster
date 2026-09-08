@@ -13,15 +13,27 @@ Three containers, one shared network namespace:
 | Service | What | Reach it at |
 | --- | --- | --- |
 | `ollama` (`ollama/ollama:rocm`) | the engine, GPU-accelerated on the 8060S | `127.0.0.1:11434` (in-namespace) |
-| `yardmaster` (`--target runtime-proxy`) | the broker + Ollama proxy | **`:11435`** — published to your LAN |
-| `yardmaster-console` | config editor + backend health + metrics + embedded dsh | **`:8770`** — published to Framework loopback |
+| `yardmaster` (`--target runtime-proxy`) | the broker + Ollama proxy | loopback `:11435` in-namespace |
+| `yardmaster-lan-shim` (`socat`) | loopback→LAN bridge for the proxy | **host `:11435`** — point LAN clients here |
+| `yardmaster-console` | config editor + backend health + metrics + embedded dsh | **`:8770`** — Framework loopback |
 
 Stack file: [`../deploy/portainer/examples/framework-strix-halo.stack.yml`](../deploy/portainer/examples/framework-strix-halo.stack.yml).
 
 > **Why a shared namespace?** The `yardmaster` entrypoint registers the local
 > engine as a manual node at `127.0.0.1:11434`, so engine and proxy must share
-> loopback. `yardmaster` and `yardmaster-console` run `network_mode:
-> service:ollama`, and every published port is declared on the `ollama` service.
+> loopback. All four services run `network_mode: service:ollama` and every
+> published port is declared on the `ollama` service.
+
+> **The proxy is loopback-only for plaintext — by design.** PAIR's security
+> model: a non-loopback plaintext request to the proxy gets **`403`** (`rejected
+> non-loopback plaintext request; cluster peers must use mTLS`). Only paired
+> cluster nodes may reach it over the LAN (mTLS). So this stack runs a tiny
+> `socat` sidecar (`yardmaster-lan-shim`) that accepts LAN traffic on `:11430`
+> and forwards it through a fresh `127.0.0.1:11435` connection — the proxy sees
+> loopback and serves it. Host port `11435` maps to the shim. See
+> [security.md](security.md). (For a machine you control, the "right" long-term
+> answer is to run Yardmaster on it too and pair the two — then it points at its
+> own `localhost` and the cluster forwards.)
 
 > **Verified working on this host (Fedora 43, Docker 29.8):** ROCm inference
 > **through the proxy on `:11435`** (`POST /v1/chat/completions` reaches the
@@ -261,7 +273,9 @@ Set on the `ollama` service (defaults in the stack are sane):
 | `rocminfo` errors on a syscall | uncomment `security_opt: [seccomp=unconfined]` on `ollama` |
 | proxy `:11435`: `no available node advertises the requested model` | the entrypoint's `node/add` didn't land — check `docker logs yardmaster \| grep "manual node"`, that the engine is on `127.0.0.1:11434`, and `YM_LOCAL_ENGINE_URL` is set. Bump `YM_MANUAL_NODE_DELAY` if the engine is slow to start. |
 | `yardmaster` container exits ~30 s after start with no error | you're on an old image — pull/rebuild; the current entrypoint holds the broker's stdin open via a FIFO (no `stdin_open` needed) |
-| LAN clients cannot reach `:11435` | firewalld (§2); confirm the `ollama` service publishes `11435:11435` |
+| LAN clients get `403` / "rejected non-loopback plaintext" | expected without the shim — confirm `yardmaster-lan-shim` is running and the `ollama` service publishes `11435:11430` |
+| LAN clients cannot reach `:11435` at all | firewalld (§2, `--add-port=11435/tcp`); confirm `yardmaster-lan-shim` is `Up` |
+| `nvpair-node-info: detected 0 GPU(s)` / `nvidia-smi unavailable` | expected on AMD — PAIR's telemetry is NVIDIA-only. Does **not** affect the engine's GPU use; only the scheduler's GPU-pressure / `vram_aware` signals, which don't matter for a single node. Tracked in [#48](https://github.com/pakgrou-porg/yardmaster/issues/48). |
 | SELinux `AVC` denial on a bind mount | add `:Z` (or `:z`) to that mount (the stack already has it on `yardmaster.toml`) |
 | Portainer build fails in `rust-build` | expected until [#36](https://github.com/pakgrou-porg/yardmaster/issues/36) — the stack uses `target: runtime-proxy`, which skips it; don't change the target |
 | "container name already in use" on redeploy | `docker rm -f yardmaster yardmaster-ollama yardmaster-console yardmaster-init` then redeploy (Portainer + explicit `container_name`) |

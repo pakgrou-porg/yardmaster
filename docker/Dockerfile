@@ -61,7 +61,12 @@ LABEL org.opencontainers.image.licenses="Apache-2.0"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl tini \
+      pciutils hwdata \
     && rm -rf /var/lib/apt/lists/*
+# ^ pciutils + hwdata give nvpair-node-info a pci.ids DB so it stops logging
+#   "No pci-ids DB files found". GPU utilisation/VRAM telemetry still needs
+#   nvidia-smi and is unavailable on AMD ROCm (tracked in a repo issue) — this
+#   does not affect the engine's own GPU use.
 
 # Non-root by default. The data volume is chowned in the entrypoint.
 RUN useradd --system --create-home --uid 10001 --shell /usr/sbin/nologin yardmaster

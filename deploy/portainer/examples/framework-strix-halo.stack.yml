@@ -9,12 +9,18 @@
 # docs/deployment-framework-strix-halo.md first (BIOS iGPU-memory carve-out,
 # `setsebool container_use_devices`, firewalld; rocminfo reports gfx1100, no override).
 #
-# Topology: `ollama` owns the network namespace; `yardmaster` (broker + proxy)
-# and `yardmaster-console` share it. The yardmaster entrypoint registers the
-# local engine as a manual node at 127.0.0.1:11434; the proxy stays on 11435.
+# Topology: `ollama` owns the network namespace; `yardmaster` (broker + proxy),
+# `yardmaster-console`, and `yardmaster-lan-shim` share it. The yardmaster
+# entrypoint registers the local engine as a manual node at 127.0.0.1:11434;
+# the proxy stays on 11435.
 #
-# Point LAN clients at http://<framework-ip>:11435
-# Open the Console at    http://127.0.0.1:8770  (on the Framework itself)
+# The proxy REFUSES non-loopback plaintext (403 — PAIR's security model; only
+# paired cluster peers may reach it over mTLS). So a tiny socat sidecar
+# (`yardmaster-lan-shim`) listens on 11430 and forwards to 127.0.0.1:11435,
+# making LAN requests originate from loopback. Host port 11435 maps to it.
+#
+# Point LAN clients at http://<framework-ip>:11435   (-> lan-shim -> proxy)
+# Open the Console at    http://127.0.0.1:8770        (on the Framework itself)
 
 services:
   ollama:
@@ -37,7 +43,7 @@ services:
       OLLAMA_FLASH_ATTENTION: "1"
       # HSA_OVERRIDE_GFX_VERSION: "11.0.0"    # rocminfo reports gfx1100 (native); only if CPU fallback
     ports:
-      - "11435:11435"                         # Yardmaster proxy -> your LAN
+      - "11435:11430"                         # LAN -> yardmaster-lan-shim -> loopback proxy
       - "127.0.0.1:8770:8770"                 # Console -> Framework loopback only
       # - "11434:11434"                       # Ollama direct, if you want it too
       # - "127.0.0.1:3080:3080"               # dsh Web UI, if run in-namespace
@@ -75,6 +81,18 @@ services:
       YM_HEALTHCHECK_URL: http://127.0.0.1:11435/api/tags
     volumes:
       - yardmaster-data:/data
+
+  # Bridges the proxy's loopback-only plaintext ingress to the LAN: LAN clients
+  # hit host :11435 -> here :11430 -> a fresh 127.0.0.1:11435 connection, which
+  # the proxy accepts. Without this, non-loopback plaintext gets 403 by design.
+  yardmaster-lan-shim:
+    image: alpine/socat:latest
+    container_name: yardmaster-lan-shim
+    restart: unless-stopped
+    network_mode: "service:ollama"
+    depends_on:
+      yardmaster: { condition: service_started }
+    command: ["-d", "TCP-LISTEN:11430,fork,reuseaddr", "TCP:127.0.0.1:11435"]
 
   yardmaster-console:
     build:
