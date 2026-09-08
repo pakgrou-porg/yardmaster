@@ -39,8 +39,8 @@ services:
     ports:
       - "11435:11430"                    # LAN -> yardmaster-lan-shim -> loopback proxy
       - "127.0.0.1:8770:8770"            # the Console, host-loopback only
+      - "127.0.0.1:3080:3081"            # DeepSeek Harness UI -> harness-shim -> dsh (loopback)
       # - "11434:11434"                  # uncomment for Ollama direct
-      # - "127.0.0.1:3080:3080"          # uncomment if you run dsh in-namespace
     volumes:
       - ollama-models:/root/.ollama
     healthcheck:
@@ -87,6 +87,34 @@ services:
     depends_on:
       yardmaster: { condition: service_started }
     command: ["-d", "TCP-LISTEN:11430,fork,reuseaddr", "TCP:127.0.0.1:11435"]
+
+  # DeepSeek Harness Web UI. dsh binds 127.0.0.1 only (it runs model-generated
+  # code) and prints a per-boot token — get it from
+  #   docker logs yardmaster-harness | grep 'dsh web:'
+  # and open http://127.0.0.1:3080/?token=... on this host.
+  yardmaster-harness:
+    image: yardmaster:proxy-local        # already bundles dsh + node
+    container_name: yardmaster-harness
+    restart: unless-stopped
+    network_mode: "service:ollama"
+    depends_on:
+      yardmaster-init: { condition: service_completed_successfully }
+      yardmaster-lan-shim: { condition: service_started }
+    entrypoint: ["/usr/bin/tini", "--", "node", "/opt/yardmaster/node_modules/@deepseek-ai/dsh/lib/bin.js"]
+    command: ["web", "--no-open", "--host", "127.0.0.1", "--port", "3080", "--trusted-host", "127.0.0.1:3080"]
+    environment:
+      DSH_HOME: /data/harness
+    volumes:
+      - yardmaster-data:/data
+
+  yardmaster-harness-shim:
+    image: alpine/socat:latest
+    container_name: yardmaster-harness-shim
+    restart: unless-stopped
+    network_mode: "service:ollama"
+    depends_on:
+      yardmaster-harness: { condition: service_started }
+    command: ["-d", "TCP-LISTEN:3081,fork,reuseaddr", "TCP:127.0.0.1:3080"]
 
   yardmaster-console:
     build:

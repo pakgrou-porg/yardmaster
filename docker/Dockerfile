@@ -74,7 +74,8 @@ RUN useradd --system --create-home --uid 10001 --shell /usr/sbin/nologin yardmas
 # dsh (optional): only invoked when YM_AGENT=1.
 COPY --from=dsh /usr/local/lib/node_modules /opt/yardmaster/node_modules
 COPY --from=dsh /usr/local/bin/node /usr/local/bin/node
-RUN ln -s /opt/yardmaster/node_modules/@deepseek-ai/dsh/bin/dsh.mjs /usr/local/bin/dsh || true
+# @deepseek-ai/dsh's bin is lib/bin.js (a `#!/usr/bin/env node` script).
+RUN ln -s /opt/yardmaster/node_modules/@deepseek-ai/dsh/lib/bin.js /usr/local/bin/dsh
 
 COPY docker/entrypoint.sh /usr/local/bin/yardmaster-entrypoint
 RUN chmod +x /usr/local/bin/yardmaster-entrypoint

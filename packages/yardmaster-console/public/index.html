@@ -65,8 +65,15 @@ SPDX-License-Identifier: Apache-2.0
       <section id="agent" class="tab">
         <div class="bar">
           <span class="dim">DeepSeek Harness Web UI — <code id="ag-url"></code></span>
-          <a id="ag-open" target="_blank" rel="noreferrer">open in a tab</a>
+          <a id="ag-open" target="_blank" rel="noreferrer">open in a tab ↗</a>
         </div>
+        <p class="dim">
+          dsh binds loopback and issues a one-time token per boot. If the frame
+          below shows <code>401</code>, run
+          <code>docker logs yardmaster-harness | grep 'dsh web:'</code> and open
+          that full <code>…/?token=…</code> URL in a new tab. The frame then
+          works (the token becomes a cookie).
+        </p>
         <iframe id="ag-frame" title="DeepSeek Harness"></iframe>
       </section>
     </main>

@@ -45,8 +45,8 @@ services:
     ports:
       - "11435:11430"                         # LAN -> yardmaster-lan-shim -> loopback proxy
       - "127.0.0.1:8770:8770"                 # Console -> Framework loopback only
+      - "127.0.0.1:3080:3081"                 # DeepSeek Harness UI -> harness-shim -> dsh (loopback)
       # - "11434:11434"                       # Ollama direct, if you want it too
-      # - "127.0.0.1:3080:3080"               # dsh Web UI, if run in-namespace
     volumes:
       - ollama-models:/root/.ollama
     healthcheck:
@@ -95,6 +95,38 @@ services:
     depends_on:
       yardmaster: { condition: service_started }
     command: ["-d", "TCP-LISTEN:11430,fork,reuseaddr", "TCP:127.0.0.1:11435"]
+
+  # DeepSeek Harness Web UI. dsh only binds 127.0.0.1 (it runs model-generated
+  # code — it refuses 0.0.0.0), and it prints a per-boot token:
+  #   docker logs yardmaster-harness | grep 'dsh web:'
+  # open that full URL (http://127.0.0.1:3080/?token=...) on the Framework.
+  # DSH_HOME on the volume persists sessions/credentials. Point a model at the
+  # Yardmaster proxy in dsh's Settings, or via --set below.
+  yardmaster-harness:
+    image: yardmaster:proxy-local        # already bundles dsh + node — no separate build
+    container_name: yardmaster-harness
+    restart: unless-stopped
+    network_mode: "service:ollama"
+    depends_on:
+      yardmaster-init: { condition: service_completed_successfully }
+      yardmaster-lan-shim: { condition: service_started }
+    entrypoint: ["/usr/bin/tini", "--", "node", "/opt/yardmaster/node_modules/@deepseek-ai/dsh/lib/bin.js"]
+    command: ["web", "--no-open", "--host", "127.0.0.1", "--port", "3080", "--trusted-host", "127.0.0.1:3080"]
+    environment:
+      DSH_HOME: /data/harness
+    volumes:
+      - yardmaster-data:/data
+
+  # dsh binds loopback only, so a published port can't reach it directly — this
+  # socat sidecar (same namespace) forwards 3081 -> 127.0.0.1:3080.
+  yardmaster-harness-shim:
+    image: alpine/socat:latest
+    container_name: yardmaster-harness-shim
+    restart: unless-stopped
+    network_mode: "service:ollama"
+    depends_on:
+      yardmaster-harness: { condition: service_started }
+    command: ["-d", "TCP-LISTEN:3081,fork,reuseaddr", "TCP:127.0.0.1:3080"]
 
   yardmaster-console:
     build:
