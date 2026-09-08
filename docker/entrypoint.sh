@@ -33,7 +33,13 @@ fi
 
 # A yardmaster.toml bind-mounted at /config is linked into the location the data
 # plane reads. Keeping it read-only at /config means Portainer configs / secrets
-# stay the source of truth.
+# stay the source of truth. Clean up a stale link first: if a previous deploy
+# had the /config bind mount and this one does not, the volume still holds a
+# dangling symlink that makes every write to the config path ENOENT.
+if [ -L "${APP_DIR}/yardmaster.toml" ] && [ ! -e "${APP_DIR}/yardmaster.toml" ]; then
+  rm -f "${APP_DIR}/yardmaster.toml"
+  echo "yardmaster-entrypoint: removed stale dangling yardmaster.toml symlink"
+fi
 if [ -f /config/yardmaster.toml ]; then
   ln -sf /config/yardmaster.toml "${APP_DIR}/yardmaster.toml"
   echo "yardmaster-entrypoint: using /config/yardmaster.toml"
@@ -65,16 +71,30 @@ fi
 # environment has every *_API_KEY / *_TOKEN / *_SECRET removed (spec 1.10 /
 # ADR-0016). The broker below keeps the full environment so the data plane can
 # reach providers.
+#
+# The `yardmaster-web` profile needs the (not-yet-published) plugin packages, so
+# until then dsh runs with its built-in OpenAI adapter pointed at the Yardmaster
+# proxy. Override via YM_AGENT_MODEL (default: a model the local engine has).
 if [ "${YM_AGENT:-0}" = "1" ] && command -v dsh >/dev/null 2>&1; then
+  YM_AGENT_BASE_URL="${YM_AGENT_BASE_URL:-http://127.0.0.1:11435/v1}"
+  YM_AGENT_MODEL="${YM_AGENT_MODEL:-llama3.2:latest}"
   (
     while IFS='=' read -r _name _; do
       case "${_name^^}" in
         *_API_KEY | *_TOKEN | *_SECRET) unset "${_name}" ;;
       esac
     done < <(env)
-    exec dsh web --profile yardmaster-web --no-open
+    if dsh --profile yardmaster-web --help >/dev/null 2>&1; then
+      exec dsh web --profile yardmaster-web --no-open
+    else
+      exec dsh web --no-open \
+        --set "llm.openai.baseURL=${YM_AGENT_BASE_URL}" \
+        --set "llm.openai.apiKey=sk-yardmaster-noauth" \
+        --set "agent.defaultModel.provider=openai" \
+        --set "agent.defaultModel.model=${YM_AGENT_MODEL}"
+    fi
   ) &
-  echo "yardmaster-entrypoint: started dsh web on 127.0.0.1:3080 (loopback only)"
+  echo "yardmaster-entrypoint: started dsh web on 127.0.0.1:3080 (model ${YM_AGENT_MODEL} via ${YM_AGENT_BASE_URL})"
 fi
 
 # --- broker worker wiring --------------------------------------------------

@@ -22,7 +22,7 @@
  */
 
 import { createServer } from "node:http";
-import { readFile, writeFile, mkdir, access } from "node:fs/promises";
+import { readFile, writeFile, mkdir, access, lstat, unlink } from "node:fs/promises";
 import { constants as FS } from "node:fs";
 import { existsSync } from "node:fs";
 import { join, extname, dirname } from "node:path";
@@ -160,6 +160,14 @@ async function handleApi(req, res, url) {
       });
     }
     try {
+      // A dangling symlink at the config path (e.g. a removed read-only /config
+      // bind mount) makes writeFile ENOENT — replace it with a real file.
+      try {
+        const st = await lstat(target);
+        if (st.isSymbolicLink() && !existsSync(target)) await unlink(target);
+      } catch {
+        /* nothing there — fine */
+      }
       await mkdir(dirname(target), { recursive: true });
       await writeFile(target, raw, "utf8");
     } catch (e) {

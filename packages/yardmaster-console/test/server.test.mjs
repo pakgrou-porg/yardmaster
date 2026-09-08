@@ -3,7 +3,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, symlinkSync, existsSync, lstatSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -50,4 +50,29 @@ test("server: healthz, status, validate, config round-trip", async (t) => {
   const idx = await fetch(`${base}/`);
   assert.equal(idx.status, 200);
   assert.match(await idx.text(), /Yardmaster Console/);
+});
+
+test("server: PUT replaces a dangling symlink at the config path", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "ymc-"));
+  const cfgPath = join(dir, "yardmaster.toml");
+  symlinkSync("/does/not/exist/config.toml", cfgPath); // stale :ro-mount leftover
+  assert.equal(existsSync(cfgPath), false);
+  assert.equal(lstatSync(cfgPath).isSymbolicLink(), true);
+
+  process.env.YM_CONFIG_PATH = cfgPath;
+  process.env.YM_CONFIG_FALLBACK = join(dir, "fallback.toml");
+  process.env.YM_METRICS_DB = join(dir, "none.db");
+  const { createConsoleServer } = await import(`../src/server.mjs?danglingsymlink`);
+  const srv = createConsoleServer();
+  await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+  const base = `http://127.0.0.1:${srv.address().port}`;
+  t.after(() => {
+    srv.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const body = `schema_version = 1\n[targets]\n[routes.d]\nid="d"\ntype="passthrough"\ntarget="x"\n[targets.x]\nid="m"\n`;
+  const r = await (await fetch(`${base}/api/config`, { method: "PUT", body })).json();
+  assert.equal(r.written, true, JSON.stringify(r));
+  assert.equal(lstatSync(cfgPath).isSymbolicLink(), false, "symlink replaced by a real file");
 });

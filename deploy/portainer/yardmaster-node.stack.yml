@@ -73,6 +73,8 @@ services:
       YM_DATAPLANE_MODE: proxy
       YM_LOCAL_ENGINE_URL: http://127.0.0.1:11434
       YM_HEALTHCHECK_URL: http://127.0.0.1:11435/api/tags
+      # YM_AGENT: "1"            # run the DeepSeek Harness UI in-container on :3080
+      # YM_AGENT_MODEL: llama3.2:latest   # a model your engine has
     volumes:
       - yardmaster-data:/data
 
