@@ -34,16 +34,20 @@ prometheus = true
 
 [targets]
 
-# --- reach an engine running elsewhere (sibling container / another host) ---
+# --- the local engine (Ollama in the shared namespace) ---
 [providers.local_ollama]
-base_url = "http://127.0.0.1:11435"   # e.g. the yardmaster-node-with-ollama stack
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:11434"   # the engine itself, not the :11435 proxy
 
-[targets.qwen]
-id = "qwen4:12b"
+# `id` must be a model you have actually pulled (`ollama list`). "llama3.2",
+# "qwen3:14b", "gemma3:12b", "deepseek-r1:14b" are real; the spec's "qwen4:*"
+# are placeholders.
+[targets.local]
+id = "llama3.2"
 locality = "lan"
 provider = "local_ollama"
 
 [routes.default]
-id = "qwen4:12b"
+id = "auto"
 type = "passthrough"
-target = "qwen"
+target = "local"

@@ -120,7 +120,7 @@ base_url = "http://10.116.2.120:8000/v1"
 [targets]
 
 [targets.local]
-id = "qwen4:12b"
+id = "llama3.2"
 locality = "lan"
 provider = "local_ollama"
 
@@ -164,15 +164,19 @@ replace `"39"` / `"105"` if they differ.
 
 ## 5. Pull models, point clients
 
-```bash
-docker exec -it yardmaster-ollama ollama pull qwen4:12b
-docker exec -it yardmaster-ollama ollama pull qwen4:72b        # fits easily in 128 GB
+Use **real** Ollama model names (browse <https://ollama.com/library>). The spec's
+`qwen4:*` / `nemotron-*` are placeholders and do not exist in the registry.
 
-# through the Yardmaster proxy, from any LAN machine:
-curl http://<framework-ip>:11435/api/chat -d '{"model":"qwen4:12b","messages":[{"role":"user","content":"hi"}]}'
+```bash
+# you already have llama3.2 (~2 GB) — nothing to pull for a first test.
+docker exec -it yardmaster-ollama ollama pull qwen3:14b        # or gemma3:12b, deepseek-r1:14b
+docker exec -it yardmaster-ollama ollama pull qwen3:32b        # bigger; 70B-class fits 128 GB too (llama3.3:70b, qwen2.5:72b)
+
+# through the Yardmaster proxy, from any LAN machine (model = whatever you pulled):
+curl http://<framework-ip>:11435/api/chat -d '{"model":"llama3.2","messages":[{"role":"user","content":"hi"}]}'
 # or OpenAI-style:
 curl http://<framework-ip>:11435/v1/chat/completions -H 'content-type: application/json' \
-  -d '{"model":"qwen4:12b","messages":[{"role":"user","content":"hi"}]}'
+  -d '{"model":"llama3.2","messages":[{"role":"user","content":"hi"}]}'
 ```
 
 The entrypoint registers the engine ~10 s after the broker starts
@@ -213,7 +217,7 @@ npx @deepseek-ai/dsh@0.1.2-rc.1 web --no-open \
   --set llm.openai.baseURL=http://127.0.0.1:11435/v1 \
   --set llm.openai.apiKey=sk-unused \
   --set agent.defaultModel.provider=openai \
-  --set agent.defaultModel.model=qwen4:12b
+  --set agent.defaultModel.model=llama3.2
 # -> http://127.0.0.1:3080  ->  shows up in the Console's Agent tab
 ```
 

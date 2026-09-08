@@ -124,7 +124,11 @@ provider = "openrouter"
 
 ## One validated example per algorithm
 
-Every block below is extracted and validated in CI (`docs` job).
+Every block below is extracted and validated in CI (`docs` job). The model names
+(`qwen4:12b`, `nemotron-3.5-lightning`, …) are **logical tier targets** for
+illustration — validation does not check that they exist. For a real engine,
+use a name you have actually pulled (`ollama list`) or that your provider
+advertises.
 
 ### passthrough (also the zero-config default)
 
