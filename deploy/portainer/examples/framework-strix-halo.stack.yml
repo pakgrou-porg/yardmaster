@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 Karl Miller
 # SPDX-License-Identifier: Apache-2.0
 #
-# Yardmaster + ROCm Ollama + Console on a Framework Desktop
+# Yardmaster + ROCm Ollama + Console + DeepSeek Harness on a Framework Desktop
 # (AMD Ryzen AI Max+ 395 / "Strix Halo", Radeon 8060S iGPU, 128 GB unified
 # memory), Fedora 43/44.
 #
@@ -9,18 +9,24 @@
 # docs/deployment-framework-strix-halo.md first (BIOS iGPU-memory carve-out,
 # `setsebool container_use_devices`, firewalld; rocminfo reports gfx1100, no override).
 #
-# Topology: `ollama` owns the network namespace; `yardmaster` (broker + proxy),
-# `yardmaster-console`, and `yardmaster-lan-shim` share it. The yardmaster
-# entrypoint registers the local engine as a manual node at 127.0.0.1:11434;
-# the proxy stays on 11435.
+# Topology: `ollama` owns the network namespace; every other service joins it
+# with `network_mode: service:ollama`, so all published ports are declared on
+# `ollama`. The `yardmaster` entrypoint registers the local engine as a manual
+# node at 127.0.0.1:11434; the proxy stays on 11435.
 #
-# The proxy REFUSES non-loopback plaintext (403 — PAIR's security model; only
-# paired cluster peers may reach it over mTLS). So a tiny socat sidecar
-# (`yardmaster-lan-shim`) listens on 11430 and forwards to 127.0.0.1:11435,
-# making LAN requests originate from loopback. Host port 11435 maps to it.
+# Ports:
+#   11435  -> yardmaster-lan-shim -> 127.0.0.1:11435 proxy   (LAN; plaintext)
+#    8770  -> Yardmaster Console                              (${YM_BIND})
+#    3080  -> yardmaster-harness-shim -> 127.0.0.1:3080 dsh   (${YM_BIND})
 #
-# Point LAN clients at http://<framework-ip>:11435   (-> lan-shim -> proxy)
-# Open the Console at    http://127.0.0.1:8770        (on the Framework itself)
+# LAN ACCESS: set the stack env var  YM_BIND=0.0.0.0  (default 127.0.0.1) to
+# expose the Console and Harness to your LAN, and set  YM_LAN_HOST=<framework-ip>
+# so dsh's browser-trust fence accepts that authority. SECURITY: the Console has
+# NO auth (anyone who can reach :8770 can rewrite yardmaster.toml) and dsh runs
+# model-generated code behind only a launch-token + signed cookie. On a shared
+# network put an authenticating reverse proxy in front (see the doc) or restrict
+# the source with firewalld.
+
 
 services:
   ollama:
@@ -43,10 +49,10 @@ services:
       OLLAMA_FLASH_ATTENTION: "1"
       # HSA_OVERRIDE_GFX_VERSION: "11.0.0"    # rocminfo reports gfx1100 (native); only if CPU fallback
     ports:
-      - "11435:11430"                         # LAN -> yardmaster-lan-shim -> loopback proxy
-      - "127.0.0.1:8770:8770"                 # Console -> Framework loopback only
-      - "127.0.0.1:3080:3081"                 # DeepSeek Harness UI -> harness-shim -> dsh (loopback)
-      # - "11434:11434"                       # Ollama direct, if you want it too
+      - "11435:11430"                              # inference proxy -> LAN
+      - "${YM_BIND:-127.0.0.1}:8770:8770"          # Console
+      - "${YM_BIND:-127.0.0.1}:3080:3081"          # DeepSeek Harness UI
+      # - "11434:11434"                            # Ollama direct, if you want it too
     volumes:
       - ollama-models:/root/.ollama
     healthcheck:
@@ -58,9 +64,10 @@ services:
   yardmaster-init:
     image: alpine:latest
     container_name: yardmaster-init
-    command: sh -c "chown -R 10001:10001 /data"
+    command: sh -c "chown -R 10001:10001 /data /dshhome"
     volumes:
       - yardmaster-data:/data
+      - yardmaster-harness:/dshhome
 
   yardmaster:
     build:
@@ -79,8 +86,6 @@ services:
       YM_DATAPLANE_MODE: proxy
       YM_LOCAL_ENGINE_URL: http://127.0.0.1:11434
       YM_HEALTHCHECK_URL: http://127.0.0.1:11435/api/tags
-      # YM_AGENT: "1"            # run the DeepSeek Harness UI in-container on :3080
-      # YM_AGENT_MODEL: llama3.2:latest   # a model your engine has
     volumes:
       - yardmaster-data:/data
 
@@ -96,12 +101,12 @@ services:
       yardmaster: { condition: service_started }
     command: ["-d", "TCP-LISTEN:11430,fork,reuseaddr", "TCP:127.0.0.1:11435"]
 
-  # DeepSeek Harness Web UI. dsh only binds 127.0.0.1 (it runs model-generated
-  # code — it refuses 0.0.0.0), and it prints a per-boot token:
-  #   docker logs yardmaster-harness | grep 'dsh web:'
-  # open that full URL (http://127.0.0.1:3080/?token=...) on the Framework.
-  # DSH_HOME on the volume persists sessions/credentials. Point a model at the
-  # Yardmaster proxy in dsh's Settings, or via --set below.
+  # DeepSeek Harness Web UI. dsh binds 127.0.0.1 only (it executes model code and
+  # refuses 0.0.0.0). The entrypoint captures dsh's announced URL (with its
+  # per-boot launch token) to $DSH_HOME/web-url so the Console can link to the
+  # current one. DSH_HOME is a dedicated volume: sessions, credentials, and the
+  # signed-cookie secret persist, so the browser session survives restarts (you
+  # only paste the tokened URL once per browser).
   yardmaster-harness:
     image: yardmaster:proxy-local        # already bundles dsh + node — no separate build
     container_name: yardmaster-harness
@@ -109,13 +114,16 @@ services:
     network_mode: "service:ollama"
     depends_on:
       yardmaster-init: { condition: service_completed_successfully }
-      yardmaster-lan-shim: { condition: service_started }
-    entrypoint: ["/usr/bin/tini", "--", "node", "/opt/yardmaster/node_modules/@deepseek-ai/dsh/lib/bin.js"]
-    command: ["web", "--no-open", "--host", "127.0.0.1", "--port", "3080", "--trusted-host", "127.0.0.1:3080"]
+      yardmaster: { condition: service_started }
+    entrypoint: ["/usr/bin/tini", "--", "/usr/local/bin/yardmaster-harness-entrypoint"]
     environment:
-      DSH_HOME: /data/harness
+      DSH_HOME: /dshhome
+      YM_HARNESS_PORT: "3080"
+      YM_HARNESS_TRUSTED_HOSTS: "127.0.0.1:3080 ${YM_LAN_HOST:-}:3080"
+      # Point dsh's default model at the Yardmaster proxy without touching its UI:
+      # YM_HARNESS_EXTRA_ARGS: "--set agent-default-model.provider=openai --set agent-default-model.model=llama3.2:latest"
     volumes:
-      - yardmaster-data:/data
+      - yardmaster-harness:/dshhome
 
   # dsh binds loopback only, so a published port can't reach it directly — this
   # socat sidecar (same namespace) forwards 3081 -> 127.0.0.1:3080.
@@ -138,22 +146,25 @@ services:
     network_mode: "service:ollama"
     depends_on:
       yardmaster: { condition: service_started }
+      yardmaster-harness: { condition: service_started }
     environment:
       YM_CONSOLE_PORT: "8770"
       YM_CONSOLE_BIND: 0.0.0.0
       YM_LOCAL_ENGINE_URL: http://127.0.0.1:11434
-      YM_AGENT_URL: http://127.0.0.1:3080
+      YM_AGENT_URL: http://127.0.0.1:3080          # fallback; host is derived from the request
+      YM_HARNESS_URL_FILE: /dshhome/web-url
       YM_CONFIG_PATH: /config/yardmaster.toml
       YM_CONFIG_FALLBACK: "/data/Nvidia Corporation/Personal AI Router/yardmaster.toml"
       YM_METRICS_DB: "/data/Nvidia Corporation/Personal AI Router/yardmaster-metrics.db"
     volumes:
       - yardmaster-data:/data
+      - yardmaster-harness:/dshhome:ro             # read the current tokened URL
       # To pin yardmaster.toml from the host: create the file first
       # (`sudo install -Dm644 /dev/null /etc/yardmaster/yardmaster.toml`), then
-      # uncomment. Keep :ro,Z so SELinux relabels it. If it does not exist,
-      # Docker would create a directory here and the Console read fails.
+      # uncomment. Keep :ro,Z so SELinux relabels it.
       # - /etc/yardmaster/yardmaster.toml:/config/yardmaster.toml:ro,Z
 
 volumes:
   ollama-models: { name: yardmaster-ollama-models }
   yardmaster-data: { name: yardmaster-data }
+  yardmaster-harness: { name: yardmaster-harness }

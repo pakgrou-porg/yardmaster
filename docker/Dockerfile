@@ -78,7 +78,8 @@ COPY --from=dsh /usr/local/bin/node /usr/local/bin/node
 RUN ln -s /opt/yardmaster/node_modules/@deepseek-ai/dsh/lib/bin.js /usr/local/bin/dsh
 
 COPY docker/entrypoint.sh /usr/local/bin/yardmaster-entrypoint
-RUN chmod +x /usr/local/bin/yardmaster-entrypoint
+COPY docker/harness-entrypoint.sh /usr/local/bin/yardmaster-harness-entrypoint
+RUN chmod +x /usr/local/bin/yardmaster-entrypoint /usr/local/bin/yardmaster-harness-entrypoint
 
 # All backend binaries live together so the broker resolves its siblings by
 # default (its --*-path flags default to ./ in the working directory).

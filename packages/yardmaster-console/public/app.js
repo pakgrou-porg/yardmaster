@@ -131,8 +131,10 @@ $("#mx-hours").addEventListener("change", refreshMetrics);
 // ---- agent ----
 async function loadAgent() {
   const a = await api("/api/agent");
-  $("#ag-url").textContent = a.url;
+  // Show the base (no token) for readability; navigate to the tokened one.
+  $("#ag-url").textContent = a.base || a.url;
   $("#ag-open").href = a.url;
+  $("#ag-open").textContent = a.tokened ? "open in a tab ↗ (current token)" : "open in a tab ↗";
   if ($("#ag-frame").src !== a.url) $("#ag-frame").src = a.url;
 }
 

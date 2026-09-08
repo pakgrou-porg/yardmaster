@@ -46,6 +46,8 @@ const cfg = {
     process.env.YM_METRICS_DB ||
     "/data/Nvidia Corporation/Personal AI Router/yardmaster-metrics.db",
   agentUrl: process.env.YM_AGENT_URL || "http://127.0.0.1:3080",
+  // The harness entrypoint writes the current tokened URL here.
+  harnessUrlFile: process.env.YM_HARNESS_URL_FILE || "/dshhome/web-url",
   localEngineUrl: process.env.YM_LOCAL_ENGINE_URL || "",
   dataplaneBin: process.env.YM_DATAPLANE_BIN || "", // e.g. /opt/yardmaster/bin/yardmaster-dataplane
 };
@@ -188,7 +190,33 @@ async function handleApi(req, res, url) {
   }
 
   if (url.pathname === "/api/agent" && req.method === "GET") {
-    return json(res, 200, { url: cfg.agentUrl });
+    // The agent is on the same host the browser used to reach the Console,
+    // port YM_AGENT_PORT (default 3080) — so a LAN browser gets a LAN URL and a
+    // loopback browser gets a loopback URL.
+    const browserHost = (req.headers["x-forwarded-host"] || req.headers.host || "127.0.0.1:8770")
+      .toString()
+      .split(":")[0];
+    const agentPort = process.env.YM_AGENT_PORT || "3080";
+    const base = `http://${browserHost}:${agentPort}`;
+    // Prefer the current tokened URL the harness wrote; rewrite its authority.
+    let tokenedUrl = null;
+    try {
+      const u = (await readFile(cfg.harnessUrlFile, "utf8")).trim();
+      if (/^https?:\/\//.test(u)) {
+        try {
+          const t = new URL(u);
+          const b = new URL(base);
+          t.protocol = b.protocol;
+          t.host = b.host;
+          tokenedUrl = t.toString();
+        } catch {
+          tokenedUrl = u;
+        }
+      }
+    } catch {
+      /* no web-url file yet — harness not up, or older image */
+    }
+    return json(res, 200, { url: tokenedUrl || base, base, tokened: !!tokenedUrl });
   }
 
   return json(res, 404, { error: "not found" });

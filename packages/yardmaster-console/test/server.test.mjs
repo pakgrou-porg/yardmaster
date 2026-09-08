@@ -52,6 +52,39 @@ test("server: healthz, status, validate, config round-trip", async (t) => {
   assert.match(await idx.text(), /Yardmaster Console/);
 });
 
+test("server: /api/agent serves the tokened URL, host derived from the request", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "ymc-"));
+  const urlFile = join(dir, "web-url");
+  writeFileSync(urlFile, "http://127.0.0.1:3080/?token=SECRET123\n");
+  process.env.YM_CONFIG_PATH = join(dir, "yardmaster.toml");
+  process.env.YM_HARNESS_URL_FILE = urlFile;
+  process.env.YM_AGENT_URL = "http://127.0.0.1:3080";
+  process.env.YM_AGENT_PORT = "3080";
+
+  const { createConsoleServer } = await import(`../src/server.mjs?agenturl`);
+  const srv = createConsoleServer();
+  await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+  const base = `http://127.0.0.1:${srv.address().port}`;
+  t.after(() => {
+    srv.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  // fetch() forbids overriding Host, so use X-Forwarded-Host (which the server
+  // prefers anyway — the realistic reverse-proxy case).
+  const loopback = await (
+    await fetch(`${base}/api/agent`, { headers: { "x-forwarded-host": "127.0.0.1:8770" } })
+  ).json();
+  assert.equal(loopback.url, "http://127.0.0.1:3080/?token=SECRET123");
+  assert.equal(loopback.tokened, true);
+
+  const lan = await (
+    await fetch(`${base}/api/agent`, { headers: { "x-forwarded-host": "10.9.8.7:8770" } })
+  ).json();
+  assert.equal(lan.url, "http://10.9.8.7:3080/?token=SECRET123", "host rewritten to what the browser used");
+  assert.equal(lan.base, "http://10.9.8.7:3080");
+});
+
 test("server: PUT replaces a dangling symlink at the config path", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "ymc-"));
   const cfgPath = join(dir, "yardmaster.toml");

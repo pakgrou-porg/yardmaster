@@ -51,10 +51,11 @@ otherwise).
 | `11434` | the engine (Ollama), on loopback in the namespace | optional (`"11434:11434"`) for engine-direct |
 | `11435` | the Yardmaster **proxy** — its headless default | **no** — loopback-only for plaintext (403 otherwise) |
 | `11430` | `yardmaster-lan-shim` (`socat`) → `127.0.0.1:11435` | **yes** — `"11435:11430"`; this is the LAN entry point |
-| `8770` | the Yardmaster **Console** | host-loopback only (`"127.0.0.1:8770:8770"`) |
+| `8770` | the Yardmaster **Console** | `"${YM_BIND:-127.0.0.1}:8770:8770"` — loopback unless you opt into LAN |
 | `4000` | the data plane's Anthropic + `/health` + `/metrics` | only meaningful in `dataplane` mode |
 | `14318` | PAIR node telemetry (plaintext) | **never** publish off-host |
-| `3080` | the dsh Web UI, if run in-namespace | host-loopback only |
+| `3081` | `yardmaster-harness-shim` (`socat`) → `127.0.0.1:3080` | `"${YM_BIND:-127.0.0.1}:3080:3081"` — dsh won't bind `0.0.0.0` itself |
+| `3080` | the **`yardmaster-harness`** service (`dsh web`), in-namespace loopback | via the shim above |
 
 **The proxy refuses non-loopback plaintext with `403`** (PAIR's security model;
 `docs/security.md`). Only paired cluster peers reach it over the LAN, via mTLS.
@@ -133,12 +134,28 @@ docker exec -it yardmaster /opt/yardmaster/bin/nvpair-tui
 
 ## The agent (DeepSeek Harness)
 
-Run `dsh` in the same namespace on `127.0.0.1:3080`; it shows in the Console's
-**Agent** tab. Until the `dsh-yardmaster` adapter has a data plane, point dsh's
-built-in OpenAI adapter at the proxy (`http://127.0.0.1:11435/v1`) so Yardmaster
-still does placement. See the Strix Halo doc §7. The dsh child inherits an
-environment stripped of `*_API_KEY` / `*_TOKEN` / `*_SECRET` (ADR-0016). Do not
-publish `3080` off-host.
+The **`yardmaster-harness`** service runs `dsh web` on in-namespace loopback
+`:3080` (dsh refuses `0.0.0.0` — it executes model code), published via the
+`yardmaster-harness-shim` `socat` sidecar. Its entrypoint
+(`docker/harness-entrypoint.sh`) writes the current tokened URL to
+`$DSH_HOME/web-url`, which the Console mounts `:ro` and links from its **Agent**
+tab (rewriting the host to match your request, so the link works from loopback
+and LAN).
+
+**Token persistence.** dsh mints a new launch token each start but sets a signed
+cookie from a secret in `DSH_HOME`. Mount a dedicated volume at `/dshhome`
+(`DSH_HOME=/dshhome`, chowned to `10001` by `yardmaster-init`) so that secret,
+sessions, and credentials survive restarts — the browser stays logged in.
+
+Until the `dsh-yardmaster` adapter has a data plane, point dsh's built-in OpenAI
+adapter at the proxy (`http://127.0.0.1:11435/v1`) via `YM_HARNESS_EXTRA_ARGS`
+so Yardmaster still does placement. See the Strix Halo doc §7. The dsh child
+inherits an environment stripped of `*_API_KEY` / `*_TOKEN` / `*_SECRET`
+(ADR-0016).
+
+**LAN.** `${YM_BIND:-127.0.0.1}` gates the published `:8770`/`:3080`. Set
+`YM_BIND=0.0.0.0` and `YM_LAN_HOST=<host-ip>` (added to dsh's `--trusted-host`)
+to reach both from the LAN. Neither has real auth — see the security notes.
 
 ## Upgrades
 
@@ -150,13 +167,16 @@ you care about.
 
 - Plaintext inference ingress is loopback-only **inside the namespace**; the
   proxy port you publish (`11435`) is the LAN entry point.
-- Images run as non-root (`uid 10001` / `10002`). The Console can write
-  `yardmaster.toml`; it never handles API keys and never reads prompt/response
-  content.
+- Images run as non-root (`uid 10001`). The Console can write `yardmaster.toml`;
+  it never handles API keys and never reads prompt/response content.
 - Node telemetry `14318` is plaintext (inherited from PAIR). `[cluster]
   telemetry_auth = "mtls"` on shared networks.
-- Do not publish `8770` (Console), `3080` (dsh), or `14318` to an untrusted
-  network.
+- The Console has **no authentication** and the Harness is guarded only by a
+  launch token + signed cookie. `YM_BIND=0.0.0.0` exposes both to the LAN — only
+  do this on a trusted network, or front them with an authenticating reverse
+  proxy (Caddy `basic_auth` example in the Strix Halo doc §6) and keep
+  `YM_BIND=127.0.0.1`.
+- Never publish `14318` to any untrusted network.
 
 ## Known gaps
 
