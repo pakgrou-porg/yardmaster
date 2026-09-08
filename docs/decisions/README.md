@@ -35,3 +35,4 @@ and that every row points at a file that exists.
 | [0021](0021-dsh-version-pin.md) | dsh version pin: installable 0.1.2-rc.1, upstream SHA declares 0.1.3-alpha.1 | accepted |
 | [0022](0022-headless-container-deployment.md) | Headless container deployment: one node per host, host networking, engines out of the container | accepted |
 | [0023](0023-yardmaster-console.md) | A minimal standalone web console for the interim | accepted |
+| [0024](0024-container-sibling-engine-wiring.md) | Containerised runtime-proxy fronts a sibling engine via manual-node injection | accepted |

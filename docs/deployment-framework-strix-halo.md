@@ -3,10 +3,10 @@ SPDX-FileCopyrightText: Copyright (c) 2026 Karl Miller
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Yardmaster on a Framework Desktop (Ryzen AI Max+ 395 / Strix Halo), Fedora 44
+# Yardmaster on a Framework Desktop (Ryzen AI Max+ 395 / Strix Halo), Fedora 43/44
 
 Target: AMD Ryzen AI Max+ 395 (16 × Zen 5), Radeon 8060S iGPU (RDNA 3.5,
-`gfx1151`), 128 GB LPDDR5x unified memory, Fedora 44, Docker + Portainer.
+`gfx1100` per `rocminfo` on this host), 128 GB LPDDR5x unified memory, Fedora 43/44, Docker + Portainer.
 
 Three containers, one shared network namespace:
 
@@ -18,21 +18,24 @@ Three containers, one shared network namespace:
 
 Stack file: [`../deploy/portainer/examples/framework-strix-halo.stack.yml`](../deploy/portainer/examples/framework-strix-halo.stack.yml).
 
-> **Why a shared namespace?** The broker's auto-advertise loop probes
-> `127.0.0.1:11434` for the local engine, so engine and proxy must share
-> loopback. `yardmaster` and `yardmaster-console` therefore run
-> `network_mode: service:ollama`, and every published port is declared on the
-> `ollama` service.
+> **Why a shared namespace?** The `yardmaster` entrypoint registers the local
+> engine as a manual node at `127.0.0.1:11434`, so engine and proxy must share
+> loopback. `yardmaster` and `yardmaster-console` run `network_mode:
+> service:ollama`, and every published port is declared on the `ollama` service.
 
-> **What works today:** ROCm inference through `:11435`, the Console (config +
-> backend health), and the embedded dsh UI pointed at `:11435`. **What doesn't
-> yet:** Switchyard model-selection, the `:4000` Anthropic ingress, remote/vLLM
-> routing by config — all need `YM_DATAPLANE_MODE=dataplane`
+> **Verified working on this host (Fedora 43, Docker 29.8):** ROCm inference
+> **through the proxy on `:11435`** (`POST /v1/chat/completions` reaches the
+> engine and returns a response), the Console (config editing + Validate + live
+> backend probes), and the embedded dsh UI. The `yardmaster` `runtime-proxy`
+> image builds from source in Portainer. **Not yet:** Switchyard
+> model-selection, the `:4000` Anthropic ingress, and routing to the Asus/Susa
+> vLLM nodes by config — all need `YM_DATAPLANE_MODE=dataplane`
 > ([#36](https://github.com/pakgrou-porg/yardmaster/issues/36) →
-> [#26](https://github.com/pakgrou-porg/yardmaster/issues/26)). Plaintext
-> routing through the proxy to the unmanaged sibling engine is tracked in
-> [#47](https://github.com/pakgrou-porg/yardmaster/issues/47); if it 502s, point
-> clients at `:11434` (Ollama direct) meanwhile.
+> [#26](https://github.com/pakgrou-porg/yardmaster/issues/26)). See
+> [ADR-0024](decisions/0024-container-sibling-engine-wiring.md) for how the
+> container wires the engine (engine-manager removed; a FIFO holds the broker's
+> stdin open — **no `stdin_open` / `tty` needed**; a `node/add` frame registers
+> the engine).
 
 ---
 
@@ -45,14 +48,14 @@ Reboot → BIOS → set the iGPU / UMA framebuffer:
 | "UMA Frame Buffer Size" / "iGPU Memory" / "Dedicated Graphics Memory" | **≥ 48 GB** (64–96 GB for 70B-class models) |
 | "UMA Mode" | `UMA_SPECIFIED` / `Dedicated` (not `Auto`) |
 
-Current ROCm/Ollama VRAM sizing on `gfx1151` keys off this carve-out. Leave
+Current ROCm/Ollama VRAM sizing keys off this carve-out. Leave
 16–32 GB for the OS + router.
 
 Verify after boot: `rocminfo | grep -A2 'Pool 1' | grep Size`.
 
 ---
 
-## 2. Fedora 44 host prep
+## 2. Fedora 43/44 host prep
 
 ```bash
 # --- Docker CE ---
@@ -61,7 +64,7 @@ sudo dnf config-manager addrepo --from-repofile=https://download.docker.com/linu
 sudo dnf -y install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 sudo systemctl enable --now docker
 sudo usermod -aG docker "$USER"        # log out / back in
-# (If there is no Fedora 44 build yet, point the repo at Fedora 41 packages, or
+# (If there is no matching Fedora build yet, point the repo at Fedora 41 packages, or
 #  use rootful podman: sudo systemctl enable --now podman.socket)
 
 # --- SELinux: let containers use the GPU device nodes ---
@@ -172,9 +175,13 @@ curl http://<framework-ip>:11435/v1/chat/completions -H 'content-type: applicati
   -d '{"model":"qwen4:12b","messages":[{"role":"user","content":"hi"}]}'
 ```
 
-If the proxy returns `502` (no routable engine — [#47](https://github.com/pakgrou-porg/yardmaster/issues/47)),
-point clients at `http://<framework-ip>:11434` (add `- "11434:11434"` to the
-`ollama` service's `ports`) until `dataplane` mode lands.
+The entrypoint registers the engine ~10 s after the broker starts
+(`YM_MANUAL_NODE_DELAY`); `docker logs yardmaster | grep "manual node"` should
+show `ollama_up=true models=N`. If the proxy still returns `no available node
+advertises the requested model`, the engine isn't on `127.0.0.1:11434` in the
+shared namespace — check `OLLAMA_HOST` and that `network_mode: service:ollama`
+is set. As a fallback, add `- "11434:11434"` to the `ollama` service and point
+clients there directly.
 
 ---
 
@@ -219,7 +226,7 @@ them. When `YM_DATAPLANE_MODE=dataplane` exists, switch to
 ## 8. Confirm the GPU is working
 
 ```bash
-docker exec -it yardmaster-ollama rocminfo | grep -i 'gfx1151\|Marketing Name'
+docker exec -it yardmaster-ollama rocminfo | grep -i 'gfx110\|Marketing Name'
 docker exec -it yardmaster-ollama ollama ps        # want "100% GPU"
 sudo dnf install -y amdgpu_top && amdgpu_top
 ```
@@ -244,11 +251,12 @@ Set on the `ollama` service (defaults in the stack are sane):
 
 | Symptom | Fix |
 | --- | --- |
-| `ollama ps` shows `100% CPU` / "no compatible GPUs" | set `HSA_OVERRIDE_GFX_VERSION: "11.5.1"` on `ollama`, redeploy; try `"11.0.0"` if needed |
+| `ollama ps` shows `100% CPU` / "no compatible GPUs" | `rocminfo` on this host reports the 8060S as `gfx1100`, natively supported — no override needed. If a build still falls back to CPU, try `HSA_OVERRIDE_GFX_VERSION: "11.0.0"` on `ollama`. |
 | ROCm sees only a few GB VRAM | raise the BIOS UMA carve-out (§1) |
-| `permission denied` on `/dev/kfd` | `sudo setsebool -P container_use_devices on`; fix `group_add` GIDs |
+| `permission denied` on `/dev/kfd` | `sudo setsebool -P container_use_devices on`; confirm `group_add: ["39","105"]` = `getent group video render` (39/105 on this host) |
 | `rocminfo` errors on a syscall | uncomment `security_opt: [seccomp=unconfined]` on `ollama` |
-| proxy `:11435` returns `502` | no routable engine yet ([#47](https://github.com/pakgrou-porg/yardmaster/issues/47)) — use `:11434` direct meanwhile |
+| proxy `:11435`: `no available node advertises the requested model` | the entrypoint's `node/add` didn't land — check `docker logs yardmaster \| grep "manual node"`, that the engine is on `127.0.0.1:11434`, and `YM_LOCAL_ENGINE_URL` is set. Bump `YM_MANUAL_NODE_DELAY` if the engine is slow to start. |
+| `yardmaster` container exits ~30 s after start with no error | you're on an old image — pull/rebuild; the current entrypoint holds the broker's stdin open via a FIFO (no `stdin_open` needed) |
 | LAN clients cannot reach `:11435` | firewalld (§2); confirm the `ollama` service publishes `11435:11435` |
 | SELinux `AVC` denial on a bind mount | add `:Z` (or `:z`) to that mount (the stack already has it on `yardmaster.toml`) |
 | Portainer build fails in `rust-build` | expected until [#36](https://github.com/pakgrou-porg/yardmaster/issues/36) — the stack uses `target: runtime-proxy`, which skips it; don't change the target |

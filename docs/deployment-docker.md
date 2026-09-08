@@ -33,11 +33,16 @@ engines — run engines as their own service/host and Yardmaster fronts them.
 
 ## Topology: one shared network namespace
 
-The broker's auto-advertise loop probes `127.0.0.1:11434` for the local engine,
-so the engine and the proxy must share loopback. The stacks put the **`ollama`**
-service in charge of the namespace and run `yardmaster` and `yardmaster-console`
-with `network_mode: service:ollama`. Every published port is declared on the
-`ollama` service.
+The `yardmaster` entrypoint registers the local engine as a **manual node** at
+`127.0.0.1:11434` (parsed from `YM_LOCAL_ENGINE_URL`) so the containerised proxy
+gets a routing target — see
+[ADR-0024](decisions/0024-container-sibling-engine-wiring.md). Engine and proxy
+must therefore share loopback: the stacks put the **`ollama`** service in charge
+of the namespace and run `yardmaster` and `yardmaster-console` with
+`network_mode: service:ollama`. Every published port is declared on the `ollama`
+service. The entrypoint also holds the broker's stdin open via a FIFO, so **no
+`stdin_open` / `tty` is needed** (an older revision of these docs said
+otherwise).
 
 ## The port model (read this)
 

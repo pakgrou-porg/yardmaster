@@ -6,9 +6,11 @@
 #
 # Topology: the `ollama` service owns the network namespace; `yardmaster` (the
 # broker + proxy) and `yardmaster-console` share it (`network_mode:
-# service:ollama`). That is deliberate — the broker's auto-advertise loop probes
-# `127.0.0.1:11434` for the local engine, so engine and proxy must share
-# loopback.
+# service:ollama`). That is deliberate — the `yardmaster` entrypoint registers
+# the local engine as a manual node at `127.0.0.1:11434` (from
+# `YM_LOCAL_ENGINE_URL`), so engine and proxy must share loopback. It also holds
+# the broker's stdin open via a FIFO, so no `stdin_open` / `tty` is needed.
+# See docs/decisions/0024-container-sibling-engine-wiring.md.
 #
 # Ports (all published on the `ollama` service, which owns the namespace):
 #   11434  Ollama itself (optional to expose; the proxy fronts it)

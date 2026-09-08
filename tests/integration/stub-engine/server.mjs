@@ -106,6 +106,13 @@ const server = createServer(async (req, res) => {
 
   if (req.method === "GET" && p === "/health") return json(res, 200, { status: "ok", node: NODE_NAME });
 
+  // Ollama-style liveness: `GET /` returns 200. PAIR's broker uses this as its
+  // Ollama health probe (checkOllamaHealth).
+  if (req.method === "GET" && (p === "/" || p === "/api/version")) {
+    res.writeHead(200, { "content-type": "text/plain", "x-served-by": NODE_NAME });
+    return res.end(p === "/" ? "Ollama is running" : JSON.stringify({ version: "0.0.0-stub" }));
+  }
+
   if (req.method === "GET" && p === "/v1/models") {
     return json(res, 200, {
       object: "list",

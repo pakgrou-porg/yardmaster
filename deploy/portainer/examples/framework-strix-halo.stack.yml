@@ -3,15 +3,15 @@
 #
 # Yardmaster + ROCm Ollama + Console on a Framework Desktop
 # (AMD Ryzen AI Max+ 395 / "Strix Halo", Radeon 8060S iGPU, 128 GB unified
-# memory), Fedora 44.
+# memory), Fedora 43/44.
 #
 # GPU-tuned variant of deploy/portainer/yardmaster-node.stack.yml. Read
 # docs/deployment-framework-strix-halo.md first (BIOS iGPU-memory carve-out,
-# `setsebool container_use_devices`, firewalld, the gfx1151 override).
+# `setsebool container_use_devices`, firewalld; rocminfo reports gfx1100, no override).
 #
 # Topology: `ollama` owns the network namespace; `yardmaster` (broker + proxy)
-# and `yardmaster-console` share it. The broker's auto-advertise probes
-# 127.0.0.1:11434, so the engine sits there and the proxy on 11435.
+# and `yardmaster-console` share it. The yardmaster entrypoint registers the
+# local engine as a manual node at 127.0.0.1:11434; the proxy stays on 11435.
 #
 # Point LAN clients at http://<framework-ip>:11435
 # Open the Console at    http://127.0.0.1:8770  (on the Framework itself)
@@ -35,7 +35,7 @@ services:
       OLLAMA_MAX_LOADED_MODELS: "3"
       OLLAMA_NUM_PARALLEL: "4"
       OLLAMA_FLASH_ATTENTION: "1"
-      # HSA_OVERRIDE_GFX_VERSION: "11.5.1"    # set if model loads fall back to CPU
+      # HSA_OVERRIDE_GFX_VERSION: "11.0.0"    # rocminfo reports gfx1100 (native); only if CPU fallback
     ports:
       - "11435:11435"                         # Yardmaster proxy -> your LAN
       - "127.0.0.1:8770:8770"                 # Console -> Framework loopback only

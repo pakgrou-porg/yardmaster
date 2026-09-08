@@ -5,10 +5,16 @@
 # Headless Yardmaster node entrypoint. Starts the nvpair-ui-broker control plane,
 # which supervises every Go worker plus the data plane. No Electron, no desktop.
 #
-# The broker speaks JSON-RPC 2.0 on stdin/stdout; with no client attached it
-# simply supervises the workers, which serve their network ports. Configuration
-# is file-driven: the data plane reads yardmaster.toml from the data dir. Route
-# edits from the desktop/TUI are out of scope for a headless container.
+# The broker speaks JSON-RPC 2.0 on stdin and treats stdin EOF as "the UI
+# disconnected -> shut down". This entrypoint runs it with its stdin on a FIFO
+# we hold open for the life of the container (see the bottom of this file), so
+# the container needs NO `stdin_open` / `docker -i` and NO TTY. That same
+# channel is used to register YM_LOCAL_ENGINE_URL as a manual node so the
+# containerised proxy gets a routing target.
+#
+# Configuration is file-driven: the data plane reads yardmaster.toml from the
+# data dir. Route edits from the desktop/TUI are out of scope for a headless
+# container.
 set -euo pipefail
 
 BIN=/opt/yardmaster/bin
@@ -18,7 +24,12 @@ export XDG_CONFIG_HOME="${DATA_DIR}"
 # PAIR's per-user data directory (services/shared/appdir): <base>/Nvidia
 # Corporation/Personal AI Router, where <base> is $XDG_CONFIG_HOME on Linux.
 APP_DIR="${DATA_DIR}/Nvidia Corporation/Personal AI Router"
-mkdir -p "${APP_DIR}/cluster" "${APP_DIR}/logs"
+if ! mkdir -p "${APP_DIR}/cluster" "${APP_DIR}/logs" 2>/dev/null; then
+  echo "yardmaster-entrypoint: cannot write ${DATA_DIR} (uid $(id -u)). The /data" >&2
+  echo "  volume must be chowned to this uid first — run the yardmaster-init" >&2
+  echo "  service (\`chown -R 10001:10001 /data\`) before this container." >&2
+  exit 1
+fi
 
 # A yardmaster.toml bind-mounted at /config is linked into the location the data
 # plane reads. Keeping it read-only at /config means Portainer configs / secrets
@@ -92,5 +103,29 @@ case "${YM_DATAPLANE_MODE:-proxy}" in
     ;;
 esac
 
-echo "yardmaster-entrypoint: exec nvpair-ui-broker ${args[*]}"
-exec "${BIN}/nvpair-ui-broker" "${args[@]}"
+echo "yardmaster-entrypoint: nvpair-ui-broker ${args[*]}"
+
+# The broker reads newline-delimited JSON-RPC on stdin and treats stdin EOF as
+# "UI disconnected -> shut down". We give it a FIFO we hold open for the life of
+# the container (fd 3, read-write so it never EOFs), so the container needs no
+# `stdin_open`. We also use that channel to register the local engine as a
+# manual node — the only reliable way for the containerised proxy to get a
+# routing target (auto-advertise needs the host-only engine-manager).
+FIFO="$(mktemp -u /tmp/ym-broker.XXXXXX)"
+mkfifo "$FIFO"
+exec 3<>"$FIFO"
+
+"${BIN}/nvpair-ui-broker" "${args[@]}" <"$FIFO" &
+BROKER=$!
+trap 'kill -TERM "$BROKER" 2>/dev/null || true' TERM INT
+
+if [ -n "${YM_LOCAL_ENGINE_URL:-}" ]; then
+  ENGINE_HOST="$(printf '%s' "$YM_LOCAL_ENGINE_URL" | sed -E 's#^[a-zA-Z]+://##; s#[:/].*$##')"
+  (
+    sleep "${YM_MANUAL_NODE_DELAY:-10}"
+    printf '{"jsonrpc":"2.0","id":1,"method":"node/add","params":{"address":"%s"}}\n' "$ENGINE_HOST" >&3
+    echo "yardmaster-entrypoint: registered local engine as manual node address=${ENGINE_HOST}"
+  ) &
+fi
+
+wait "$BROKER"

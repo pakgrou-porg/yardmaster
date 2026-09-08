@@ -20,7 +20,9 @@ LABEL org.opencontainers.image.licenses="Apache-2.0"
 RUN apt-get update && apt-get install -y --no-install-recommends curl tini && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=build /app /app
-RUN useradd --system --uid 10002 --create-home yardmaster
+# uid 10001 matches the data-plane image so both can write the shared /data volume
+# after `yardmaster-init` chowns it.
+RUN useradd --system --uid 10001 --create-home yardmaster
 USER yardmaster
 
 ENV YM_CONSOLE_PORT=8770 \

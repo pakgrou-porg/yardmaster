@@ -22,7 +22,8 @@
  */
 
 import { createServer } from "node:http";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, writeFile, mkdir, access } from "node:fs/promises";
+import { constants as FS } from "node:fs";
 import { existsSync } from "node:fs";
 import { join, extname, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -62,20 +63,28 @@ const readBody = (req) =>
     req.on("end", () => resolve(Buffer.concat(c).toString("utf8")));
   });
 
-/** Where we can actually write: the primary path if writable, else the data-dir copy. */
-function writablePath() {
-  const primary = cfg.configPath;
-  if (existsSync(primary)) {
-    try {
-      // heuristic: bind-mounts are often :ro; a write probe is the only sure test,
-      // but we avoid mutating — assume the data-dir fallback when the parent dir
-      // is not writable.
-      return primary;
-    } catch {
-      /* fall through */
-    }
+/** Can we create/overwrite `p`? Checks the file if it exists, else its parent dir. */
+async function canWrite(p) {
+  try {
+    await access(p, FS.W_OK);
+    return true;
+  } catch {
+    /* file missing or read-only — check the directory */
   }
-  return cfg.fallbackConfigPath;
+  try {
+    await mkdir(dirname(p), { recursive: true });
+    await access(dirname(p), FS.W_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Where we can actually write: the primary path if writable, else the fallback. */
+async function writablePath() {
+  if (await canWrite(cfg.configPath)) return cfg.configPath;
+  if (await canWrite(cfg.fallbackConfigPath)) return cfg.fallbackConfigPath;
+  return null;
 }
 
 async function loadConfig() {
@@ -125,7 +134,7 @@ async function handleApi(req, res, url) {
 
   if (url.pathname === "/api/config" && req.method === "GET") {
     const { raw, path } = await loadConfig();
-    return json(res, 200, { raw, path, writable_path: writablePath() });
+    return json(res, 200, { raw, path, writable_path: await writablePath() });
   }
 
   if (url.pathname === "/api/config/validate" && req.method === "POST") {
@@ -139,8 +148,19 @@ async function handleApi(req, res, url) {
     const dp = await validateWithDataplane(raw);
     const v = dp || validateConfig(raw);
     if (!v.ok) return json(res, 400, { written: false, ...v });
-    const target = writablePath();
+    const target = await writablePath();
+    if (!target) {
+      return json(res, 500, {
+        written: false,
+        errors: [
+          `neither ${cfg.configPath} nor ${cfg.fallbackConfigPath} is writable — ` +
+            `check the /data volume ownership (the console runs as uid 10001; run yardmaster-init)`,
+        ],
+        warnings: v.warnings,
+      });
+    }
     try {
+      await mkdir(dirname(target), { recursive: true });
       await writeFile(target, raw, "utf8");
     } catch (e) {
       return json(res, 500, { written: false, errors: [`write failed: ${e.message}`], warnings: v.warnings });

@@ -103,13 +103,21 @@ ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/yardmaster-entrypoint"]
 # Target — runtime-proxy: Go workers only. Builds and runs today.
 # ---------------------------------------------------------------------------
 FROM runtime-base AS runtime-proxy
+USER root
 COPY --from=go-build /out/ /opt/yardmaster/bin/
+# nvpair-engine-manager installs/supervises Ollama & LM Studio as HOST processes
+# — useless in a container, and while it runs the broker resolves the local
+# engine port ONLY from it, so an unmanaged sibling engine is never wired to the
+# proxy. Remove it so the broker falls back to probing 127.0.0.1:11434 directly.
+RUN rm -f /opt/yardmaster/bin/nvpair-engine-manager \
+    && chown -R 10001:10001 /opt/yardmaster/bin
+USER yardmaster
 
 # ---------------------------------------------------------------------------
 # Target — runtime (default): adds the Rust data plane. Needs issue #36.
 # ---------------------------------------------------------------------------
 FROM runtime-proxy AS runtime
-COPY --from=rust-build /out/yardmaster-dataplane /opt/yardmaster/bin/
+COPY --from=rust-build --chown=10001:10001 /out/yardmaster-dataplane /opt/yardmaster/bin/
 ENV YM_DATAPLANE_MODE=proxy
 # ^ still 'proxy' by default until the broker learns --dataplane-path (issue #26);
 #   set YM_DATAPLANE_MODE=dataplane once that lands.
