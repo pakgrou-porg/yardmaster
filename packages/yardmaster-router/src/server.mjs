@@ -23,7 +23,7 @@
 import { createServer } from "node:http";
 import { readFileSync, statSync, existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { parseConfig, resolveRoute, knownModels } from "./router.mjs";
+import { parseConfig, resolveRoute, knownModels, sniffUsage } from "./router.mjs";
 import { openMetrics } from "./metrics.mjs";
 
 const cfg = {
@@ -254,33 +254,16 @@ async function handleChat(req, res, { ingress }) {
   }
   res.end();
 
-  // usage: non-stream body has {usage}, stream may include a usage chunk.
+  // usage: non-stream body has {usage}, a stream may carry a usage chunk.
   const usage = sniffUsage(buf);
   row.prompt_tokens = usage.prompt_tokens;
   row.completion_tokens = usage.completion_tokens;
-  row.cached_tokens = usage.cached_tokens ?? null;
+  row.cached_tokens = usage.cached_tokens;
+  row.estimated_cost_usd = usage.cost || 0;
   row.time_to_first_token_ms = firstByteAt ? firstByteAt - started : null;
   row.total_latency_ms = Date.now() - started;
   if (!upstream.ok && !row.error_class) row.error_class = "upstream_error";
   metrics.record(row);
-}
-
-function sniffUsage(text) {
-  const out = { prompt_tokens: 0, completion_tokens: 0, cached_tokens: null };
-  if (!text) return out;
-  // find the last "usage": {...} object in the text (works for JSON and SSE).
-  const m = [...text.matchAll(/"usage"\s*:\s*(\{[^}]*\})/g)];
-  if (m.length) {
-    try {
-      const u = JSON.parse(m[m.length - 1][1]);
-      out.prompt_tokens = u.prompt_tokens || u.input_tokens || 0;
-      out.completion_tokens = u.completion_tokens || u.output_tokens || 0;
-      out.cached_tokens = u.prompt_tokens_details?.cached_tokens ?? null;
-    } catch {
-      /* ignore */
-    }
-  }
-  return out;
 }
 
 // --- Ollama translation ------------------------------------------------

@@ -159,3 +159,39 @@ export function knownModels(config) {
   for (const t of Object.values(config.targets)) if (t.id) out.add(t.id);
   return [...out];
 }
+
+/**
+ * Pull token usage (and cost, if the provider reports it) out of a chat
+ * response body. Handles a whole-body JSON object (non-stream) and SSE / NDJSON
+ * (last object carrying `usage` wins). A real JSON parse — a regex breaks on the
+ * nested `*_details` sub-objects OpenAI / OpenRouter / vLLM emit.
+ */
+export function sniffUsage(text) {
+  const out = { prompt_tokens: 0, completion_tokens: 0, cached_tokens: null, cost: null };
+  if (!text) return out;
+  const take = (u) => {
+    if (!u || typeof u !== "object") return;
+    out.prompt_tokens = u.prompt_tokens ?? u.input_tokens ?? out.prompt_tokens;
+    out.completion_tokens = u.completion_tokens ?? u.output_tokens ?? out.completion_tokens;
+    out.cached_tokens =
+      u.prompt_tokens_details?.cached_tokens ?? u.cache_read_input_tokens ?? out.cached_tokens;
+    if (typeof u.cost === "number") out.cost = u.cost;
+  };
+  try {
+    take(JSON.parse(text.trim()).usage);
+    if (out.prompt_tokens || out.completion_tokens) return out;
+  } catch {
+    /* not one JSON object — fall through to a line scan */
+  }
+  for (const raw of text.split("\n")) {
+    const line = raw.startsWith("data:") ? raw.slice(5).trim() : raw.trim();
+    if (!line || line === "[DONE]" || line[0] !== "{") continue;
+    try {
+      const j = JSON.parse(line);
+      if (j.usage) take(j.usage);
+    } catch {
+      /* partial chunk */
+    }
+  }
+  return out;
+}

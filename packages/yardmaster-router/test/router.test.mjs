@@ -3,7 +3,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseConfig, resolveRoute, egressAllowed, knownModels } from "../src/router.mjs";
+import { parseConfig, resolveRoute, egressAllowed, knownModels, sniffUsage } from "../src/router.mjs";
 
 const CFG = `
 schema_version = 1
@@ -112,4 +112,33 @@ test("egressAllowed + knownModels", () => {
   assert.equal(egressAllowed("cluster", {}), true);
   const models = knownModels(parseConfig(CFG));
   assert.ok(models.includes("llama3.2:latest") && models.includes("qwen/qwen3.8-flash"));
+});
+
+test("sniffUsage parses nested usage (non-stream), SSE stream, OpenRouter cost", () => {
+  // non-stream OpenAI/Ollama with nested prompt_tokens_details
+  const nonStream = JSON.stringify({
+    choices: [{ message: { content: "ok" } }],
+    usage: { prompt_tokens: 41, completion_tokens: 12, total_tokens: 53, prompt_tokens_details: { cached_tokens: 15 } },
+  });
+  let u = sniffUsage(nonStream);
+  assert.equal(u.prompt_tokens, 41);
+  assert.equal(u.completion_tokens, 12);
+  assert.equal(u.cached_tokens, 15);
+
+  // OpenRouter reports cost in usage
+  u = sniffUsage(JSON.stringify({ usage: { prompt_tokens: 15, completion_tokens: 39, cost: 0.0021 } }));
+  assert.equal(u.cost, 0.0021);
+  assert.equal(u.completion_tokens, 39);
+
+  // SSE stream: usage only in the final chunk
+  const sse =
+    'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n' +
+    'data: {"choices":[{"delta":{}}],"usage":{"prompt_tokens":7,"completion_tokens":3,"completion_tokens_details":{"reasoning_tokens":1}}}\n\n' +
+    "data: [DONE]\n\n";
+  u = sniffUsage(sse);
+  assert.equal(u.prompt_tokens, 7);
+  assert.equal(u.completion_tokens, 3);
+
+  // nothing parseable
+  assert.deepEqual(sniffUsage("garbage"), { prompt_tokens: 0, completion_tokens: 0, cached_tokens: null, cost: null });
 });
