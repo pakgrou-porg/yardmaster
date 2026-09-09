@@ -18,7 +18,7 @@
 # Env: DSH_HOME, YM_HARNESS_PORT (3080), YM_HARNESS_PROXY_PORT (3081),
 #      YM_HARNESS_TRUSTED_HOSTS (space-separated host[:port]),
 #      YM_HARNESS_UPSTREAM (http://127.0.0.1:11435/v1),
-#      YM_HARNESS_MODEL (llama3.2:latest),
+#      YM_HARNESS_MODEL (deepseek-r1:32b),
 #      YM_HARNESS_EXTRA_ARGS (extra `dsh web` flags only),
 #      YM_AUTH_FILE, YM_AUTH_USER/YM_AUTH_PASS (proxy Basic Auth).
 set -eu
@@ -36,7 +36,7 @@ fi
 : "${YM_HARNESS_PROXY_PORT:=3081}"
 : "${YM_HARNESS_TRUSTED_HOSTS:=127.0.0.1:${YM_HARNESS_PORT}}"
 : "${YM_HARNESS_UPSTREAM:=http://127.0.0.1:11435/v1}"
-: "${YM_HARNESS_MODEL:=llama3.2:latest}"
+: "${YM_HARNESS_MODEL:=deepseek-r1:32b}"
 # pi-ai needs a hand-declared gateway's models listed. Default = just the
 # default model; add more with YM_HARNESS_MODELS="a,b,c".
 : "${YM_HARNESS_MODELS:=${YM_HARNESS_MODEL}}"

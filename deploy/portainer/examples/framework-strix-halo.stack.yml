@@ -23,7 +23,7 @@
 # ---- stack environment variables (Portainer > Stack > Environment, or .env) ----
 #   YM_BIND          127.0.0.1 (default) | 0.0.0.0   expose Console + Harness to the LAN
 #   YM_LAN_HOST      e.g. 10.116.2.145               added to dsh's --trusted-host
-#   YM_HARNESS_MODEL llama3.2:latest (default)       dsh's default model, routed via Yardmaster
+#   YM_HARNESS_MODEL deepseek-r1:32b (default)       dsh's default model, routed via Yardmaster
 #   YM_AUTH_USER / YM_AUTH_PASS                      pre-seed the admin login; if unset,
 #                                                    the Console shows a one-time setup page
 #                                                    and nothing works until you set one
@@ -136,7 +136,7 @@ services:
       YM_HARNESS_PROXY_PORT: "3081"
       YM_HARNESS_TRUSTED_HOSTS: "127.0.0.1:3080 ${YM_LAN_HOST:-}:3080"
       YM_HARNESS_UPSTREAM: http://127.0.0.1:11435/v1
-      YM_HARNESS_MODEL: "${YM_HARNESS_MODEL:-llama3.2:latest}"
+      YM_HARNESS_MODEL: "${YM_HARNESS_MODEL:-deepseek-r1:32b}"
       YM_AUTH_USER: "${YM_AUTH_USER:-}"
       YM_AUTH_PASS: "${YM_AUTH_PASS:-}"
     volumes:

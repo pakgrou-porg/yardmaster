@@ -170,7 +170,7 @@ two LAN vLLM nodes. Adjust addresses / model ids to your network. The Console's
    | --- | --- | --- |
    | `YM_BIND` | *(leave unset → 127.0.0.1)* | `0.0.0.0` for LAN |
    | `YM_LAN_HOST` | — | `10.116.2.145` (your IP) |
-   | `YM_HARNESS_MODEL` | `llama3.2:latest` | any model Yardmaster can route |
+   | `YM_HARNESS_MODEL` | `deepseek-r1:32b` (default) | any model Yardmaster can route |
    | `OPENROUTER_API_KEY` | your key | — |
    | `YM_AUTH_USER` / `YM_AUTH_PASS` | *(optional)* leave unset to use the browser setup page | — |
 
@@ -212,7 +212,7 @@ curl -s http://127.0.0.1:11435/v1/chat/completions \
 # 6. the Harness auto-config points dsh at Yardmaster
 docker exec yardmaster-harness sh -c 'grep -E "baseURL:|model:" /dshhome/profiles/web/cordis.patch.yml'
 #   baseURL: http://127.0.0.1:11435/v1
-#   model: llama3.2:latest
+#   model: deepseek-r1:32b
 ```
 
 Then open **`http://127.0.0.1:8770`** in a browser, log in, and check:
@@ -259,7 +259,17 @@ curl http://<framework-ip>:11435/v1/chat/completions \
 ```
 
 Pull local models with `docker exec yardmaster-ollama ollama pull <name>` (use
-real names from <https://ollama.com/library>).
+real names from <https://ollama.com/library>). At minimum pull the Harness
+default:
+
+```bash
+docker exec yardmaster-ollama ollama pull deepseek-r1:32b     # ~19 GB, the YM_HARNESS_MODEL default
+docker exec yardmaster-ollama ollama pull llama3.2:latest     # ~2 GB, a fast smoke-test model
+```
+
+`deepseek-r1:32b` is a reasoning model — its replies include `<think>…</think>`
+blocks. Fine for chat; if you want terser agent behaviour set `YM_HARNESS_MODEL`
+to a non-reasoning model you have pulled.
 
 ---
 

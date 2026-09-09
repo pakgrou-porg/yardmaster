@@ -116,7 +116,7 @@ provider = "openrouter"
 [routes.default]
 id = "auto"
 type = "passthrough"
-target = "local_llama32"
+target = "local_r1_32b"
 
 # Optional: local -> cloud escalation instead of pass-through. Swap the default
 # route's type to "escalation" and set the targets:

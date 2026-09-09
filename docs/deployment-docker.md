@@ -153,7 +153,7 @@ it executes model code), published via its **auth-proxy** child
 `@deepseek-ai/dsh-llm-pi-ai` with a `yardmaster` route
 (`baseURL: http://127.0.0.1:11435/v1`, `api: openai-completions`, `models:` from
 `YM_HARNESS_MODELS`) and `agent-default-model` = that route + `YM_HARNESS_MODEL`
-(default `llama3.2:latest`). `dsh` therefore routes every request through the
+(default `deepseek-r1:32b`). `dsh` therefore routes every request through the
 Yardmaster proxy with no manual step. A hand-written overlay without the marker
 on line 1 is left untouched. `dsh web` does **not** accept `--set`.
 
