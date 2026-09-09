@@ -1,0 +1,101 @@
+<!doctype html>
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 Karl Miller
+SPDX-License-Identifier: Apache-2.0
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Yardmaster — first-run setup</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body {
+        font: 15px/1.5 system-ui, sans-serif;
+        max-width: 32rem;
+        margin: 4rem auto;
+        padding: 0 1.25rem;
+      }
+      h1 { font-size: 1.3rem; margin-bottom: 0.25rem; }
+      p.sub { margin-top: 0; opacity: 0.75; }
+      label { display: block; margin: 1rem 0 0.25rem; font-weight: 600; }
+      input {
+        width: 100%;
+        padding: 0.55rem 0.6rem;
+        font-size: 1rem;
+        border: 1px solid #8886;
+        border-radius: 6px;
+        background: #8881;
+      }
+      button {
+        margin-top: 1.5rem;
+        padding: 0.6rem 1.1rem;
+        font-size: 1rem;
+        border: 0;
+        border-radius: 6px;
+        background: #2563eb;
+        color: #fff;
+        cursor: pointer;
+      }
+      button:disabled { opacity: 0.5; cursor: default; }
+      .msg { margin-top: 1rem; min-height: 1.2em; }
+      .err { color: #dc2626; }
+      .ok { color: #16a34a; }
+      code { background: #8882; padding: 0 0.25rem; border-radius: 3px; }
+    </style>
+  </head>
+  <body>
+    <h1>Set the Yardmaster admin login</h1>
+    <p class="sub">
+      This one credential protects the Yardmaster Console and the DeepSeek Harness. It is stored
+      as a scrypt hash on the <code>/data</code> volume and survives restarts. Do this from the
+      host before exposing the ports to your LAN.
+    </p>
+    <form id="f">
+      <label for="u">Username</label>
+      <input id="u" autocomplete="username" required pattern="[A-Za-z0-9._-]{2,64}" />
+      <label for="p">Password <span style="font-weight: 400; opacity: 0.7">(min 8 characters)</span></label>
+      <input id="p" type="password" autocomplete="new-password" required minlength="8" />
+      <label for="p2">Confirm password</label>
+      <input id="p2" type="password" autocomplete="new-password" required minlength="8" />
+      <button id="go" type="submit">Create admin login</button>
+      <div class="msg" id="msg"></div>
+    </form>
+    <script>
+      const $ = (s) => document.querySelector(s);
+      $("#f").addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const msg = $("#msg");
+        msg.className = "msg";
+        msg.textContent = "";
+        if ($("#p").value !== $("#p2").value) {
+          msg.className = "msg err";
+          msg.textContent = "Passwords do not match.";
+          return;
+        }
+        $("#go").disabled = true;
+        try {
+          const r = await fetch("/api/setup", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ user: $("#u").value.trim(), password: $("#p").value }),
+          });
+          const j = await r.json();
+          if (r.ok && j.ok) {
+            msg.className = "msg ok";
+            msg.textContent = "Done. Reloading — your browser will ask for the username and password.";
+            setTimeout(() => (location.href = "/"), 1200);
+          } else {
+            msg.className = "msg err";
+            msg.textContent = j.error || "Setup failed.";
+            $("#go").disabled = false;
+          }
+        } catch (err) {
+          msg.className = "msg err";
+          msg.textContent = String(err);
+          $("#go").disabled = false;
+        }
+      });
+    </script>
+  </body>
+</html>

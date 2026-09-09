@@ -21,13 +21,22 @@ BIN=/opt/yardmaster/bin
 DATA_DIR="${YM_DATA_DIR:-/data}"
 export XDG_CONFIG_HOME="${DATA_DIR}"
 
+# Self-heal volume ownership, then drop privileges. The stack runs this service
+# as root (`user: "0:0"`) so a first-deploy, root-owned named volume becomes
+# writable without a separate init container.
+if [ "$(id -u)" = "0" ]; then
+  mkdir -p "${DATA_DIR}"
+  chown -R 10001:10001 "${DATA_DIR}" 2>/dev/null || true
+  exec gosu 10001:10001 "$0" "$@"
+fi
+
 # PAIR's per-user data directory (services/shared/appdir): <base>/Nvidia
 # Corporation/Personal AI Router, where <base> is $XDG_CONFIG_HOME on Linux.
 APP_DIR="${DATA_DIR}/Nvidia Corporation/Personal AI Router"
 if ! mkdir -p "${APP_DIR}/cluster" "${APP_DIR}/logs" 2>/dev/null; then
-  echo "yardmaster-entrypoint: cannot write ${DATA_DIR} (uid $(id -u)). The /data" >&2
-  echo "  volume must be chowned to this uid first — run the yardmaster-init" >&2
-  echo "  service (\`chown -R 10001:10001 /data\`) before this container." >&2
+  echo "yardmaster-entrypoint: cannot write ${DATA_DIR} (uid $(id -u)). Start this" >&2
+  echo "  service as root (\`user: \"0:0\"\` in the stack) so it can chown the" >&2
+  echo "  volume, or pre-run \`chown -R 10001:10001 /data\` on the volume." >&2
   exit 1
 fi
 
@@ -65,36 +74,6 @@ if [ -n "${YM_LOCAL_ENGINE_URL:-}" ]; then
     sleep 2
   done
   [ "$i" -lt 30 ] && echo "yardmaster-entrypoint: local engine is up"
-fi
-
-# Optional in-container agent: dsh web on loopback only, in a subshell whose
-# environment has every *_API_KEY / *_TOKEN / *_SECRET removed (spec 1.10 /
-# ADR-0016). The broker below keeps the full environment so the data plane can
-# reach providers.
-#
-# The `yardmaster-web` profile needs the (not-yet-published) plugin packages, so
-# until then dsh runs with its built-in OpenAI adapter pointed at the Yardmaster
-# proxy. Override via YM_AGENT_MODEL (default: a model the local engine has).
-if [ "${YM_AGENT:-0}" = "1" ] && command -v dsh >/dev/null 2>&1; then
-  YM_AGENT_BASE_URL="${YM_AGENT_BASE_URL:-http://127.0.0.1:11435/v1}"
-  YM_AGENT_MODEL="${YM_AGENT_MODEL:-llama3.2:latest}"
-  (
-    while IFS='=' read -r _name _; do
-      case "${_name^^}" in
-        *_API_KEY | *_TOKEN | *_SECRET) unset "${_name}" ;;
-      esac
-    done < <(env)
-    if dsh --profile yardmaster-web --help >/dev/null 2>&1; then
-      exec dsh web --profile yardmaster-web --no-open
-    else
-      exec dsh web --no-open \
-        --set "llm.openai.baseURL=${YM_AGENT_BASE_URL}" \
-        --set "llm.openai.apiKey=sk-yardmaster-noauth" \
-        --set "agent.defaultModel.provider=openai" \
-        --set "agent.defaultModel.model=${YM_AGENT_MODEL}"
-    fi
-  ) &
-  echo "yardmaster-entrypoint: started dsh web on 127.0.0.1:3080 (model ${YM_AGENT_MODEL} via ${YM_AGENT_BASE_URL})"
 fi
 
 # --- broker worker wiring --------------------------------------------------
@@ -137,7 +116,6 @@ exec 3<>"$FIFO"
 
 "${BIN}/nvpair-ui-broker" "${args[@]}" <"$FIFO" &
 BROKER=$!
-trap 'kill -TERM "$BROKER" 2>/dev/null || true' TERM INT
 
 if [ -n "${YM_LOCAL_ENGINE_URL:-}" ]; then
   ENGINE_HOST="$(printf '%s' "$YM_LOCAL_ENGINE_URL" | sed -E 's#^[a-zA-Z]+://##; s#[:/].*$##')"
@@ -148,4 +126,36 @@ if [ -n "${YM_LOCAL_ENGINE_URL:-}" ]; then
   ) &
 fi
 
-wait "$BROKER"
+# --- Console (bundled) --------------------------------------------------
+# Reads YM_CONSOLE_* / YM_CONFIG_* / YM_METRICS_DB / YM_AUTH_* straight from the
+# environment. Auth is ON by default: first hit shows a setup page until an admin
+# sets a username/password (persisted under the data dir).
+export YM_CONSOLE_BIND="${YM_CONSOLE_BIND:-0.0.0.0}"
+export YM_CONSOLE_PORT="${YM_CONSOLE_PORT:-8770}"
+node /opt/yardmaster/console/src/server.mjs &
+CONSOLE=$!
+echo "yardmaster-entrypoint: console on ${YM_CONSOLE_BIND}:${YM_CONSOLE_PORT}"
+
+# --- LAN bridge for the loopback-only inference proxy -----------------
+# PAIR's proxy 403s non-loopback plaintext; this in-namespace forwarder makes a
+# fresh 127.0.0.1 connection so LAN clients (published :11435) are served. No
+# auth: inference clients are not browsers and model access is gated elsewhere.
+BRIDGE=""
+if [ "${YM_DATAPLANE_MODE:-proxy}" = "proxy" ]; then
+  AP_OPEN=1 AP_LISTEN_PORT="${YM_LAN_BRIDGE_PORT:-11430}" \
+  AP_TARGET_HOST=127.0.0.1 AP_TARGET_PORT="${YM_PROXY_PORT:-11435}" \
+    node /opt/yardmaster/lib/yardmaster-auth-proxy.mjs &
+  BRIDGE=$!
+  echo "yardmaster-entrypoint: LAN bridge :${YM_LAN_BRIDGE_PORT:-11430} -> 127.0.0.1:${YM_PROXY_PORT:-11435}"
+fi
+
+trap 'kill -TERM "$BROKER" "$CONSOLE" ${BRIDGE:-} 2>/dev/null || true' TERM INT
+
+# If any supervised process exits, take the container down so Docker restarts
+# the whole unit (state is on the volume, so a restart is cheap).
+wait -n "$BROKER" "$CONSOLE" ${BRIDGE:-}
+code=$?
+echo "yardmaster-entrypoint: a supervised process exited (${code}) — stopping" >&2
+kill -TERM "$BROKER" "$CONSOLE" ${BRIDGE:-} 2>/dev/null || true
+wait 2>/dev/null || true
+exit "${code}"

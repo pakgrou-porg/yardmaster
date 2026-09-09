@@ -52,6 +52,17 @@ FROM node:24-bookworm-slim AS dsh
 RUN npm i -g @deepseek-ai/dsh@0.1.2-rc.1 && npm cache clean --force
 
 # ---------------------------------------------------------------------------
+# Stage — console-build: the Yardmaster Console (bundled into runtime-base)
+# ---------------------------------------------------------------------------
+FROM node:24-bookworm-slim AS console-build
+WORKDIR /console
+COPY packages/yardmaster-console/package.json ./
+RUN npm install --omit=dev --no-audit --no-fund
+COPY packages/yardmaster-console/src ./src
+COPY packages/yardmaster-console/public ./public
+COPY crates/yardmaster-metrics/migrations ./crates/yardmaster-metrics/migrations
+
+# ---------------------------------------------------------------------------
 # Stage — runtime-base: everything except the backend binaries
 # ---------------------------------------------------------------------------
 FROM debian:bookworm-slim AS runtime-base
@@ -60,29 +71,31 @@ LABEL org.opencontainers.image.description="Headless Yardmaster node: two-stage 
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates curl tini \
+      ca-certificates curl tini gosu \
       pciutils hwdata \
     && rm -rf /var/lib/apt/lists/*
-# ^ pciutils + hwdata give nvpair-node-info a pci.ids DB so it stops logging
-#   "No pci-ids DB files found". GPU utilisation/VRAM telemetry still needs
-#   nvidia-smi and is unavailable on AMD ROCm (tracked in a repo issue) — this
-#   does not affect the engine's own GPU use.
+# ^ gosu: the entrypoints start as root to chown their named volume, then drop
+#   to uid 10001. pciutils + hwdata give nvpair-node-info a pci.ids DB so it
+#   stops logging "No pci-ids DB files found". GPU utilisation/VRAM telemetry
+#   still needs nvidia-smi (unavailable on AMD ROCm) — does not affect the
+#   engine's own GPU use.
 
-# Non-root by default. The data volume is chowned in the entrypoint.
 RUN useradd --system --create-home --uid 10001 --shell /usr/sbin/nologin yardmaster
 
-# dsh (optional): only invoked when YM_AGENT=1.
+# node + dsh (the Harness) and the bundled Console share one node runtime.
 COPY --from=dsh /usr/local/lib/node_modules /opt/yardmaster/node_modules
 COPY --from=dsh /usr/local/bin/node /usr/local/bin/node
 # @deepseek-ai/dsh's bin is lib/bin.js (a `#!/usr/bin/env node` script).
 RUN ln -s /opt/yardmaster/node_modules/@deepseek-ai/dsh/lib/bin.js /usr/local/bin/dsh
+# The Yardmaster Console (config editor + backend probes + metrics + Agent link).
+COPY --from=console-build /console /opt/yardmaster/console
 
 COPY docker/entrypoint.sh /usr/local/bin/yardmaster-entrypoint
 COPY docker/harness-entrypoint.sh /usr/local/bin/yardmaster-harness-entrypoint
 RUN chmod +x /usr/local/bin/yardmaster-entrypoint /usr/local/bin/yardmaster-harness-entrypoint
-# HTTP+WS reverse proxy with optional Basic Auth — publishes the loopback-only
-# Harness and, when the admin enables it, gates it behind a username/password.
-# Run as: node /opt/yardmaster/lib/yardmaster-auth-proxy.mjs
+# Dependency-free HTTP+WS reverse proxy: publishes the loopback-only Harness and
+# gates it behind the shared admin credential (see docker/auth-proxy.mjs). Also
+# used OPEN as the LAN bridge for the inference proxy.
 COPY docker/auth-proxy.mjs /opt/yardmaster/lib/yardmaster-auth-proxy.mjs
 
 # All backend binaries live together so the broker resolves its siblings by
@@ -94,15 +107,21 @@ ENV YM_DATA_DIR=/data \
     NVPAIR_LOG_LEVEL=info \
     YM_DATAPLANE_MODE=proxy \
     YM_LOCAL_ENGINE_URL="" \
-    YM_HEALTHCHECK_URL=http://127.0.0.1:11435/api/tags
+    YM_HEALTHCHECK_URL=http://127.0.0.1:11435/api/tags \
+    YM_CONSOLE_PORT=8770 \
+    YM_CONSOLE_BIND=0.0.0.0 \
+    YM_CONFIG_PATH=/config/yardmaster.toml \
+    YM_HARNESS_URL_FILE=/dshhome/web-url \
+    YM_AGENT_PORT=3080
 # ^ the headless ollama-proxy listens on 11435 by default (nothing calls
-#   set-port without a UI); the engine sits on 11434. See
-#   docs/deployment-docker.md "The port model".
+#   set-port without a UI); the engine sits on 11434. The bundled Console is on
+#   8770. See docs/deployment-docker.md "The port model".
 VOLUME ["/data"]
 
 # Ollama ingress, LM Studio / OpenAI ingress, Anthropic + /health + /metrics,
-# PAIR node telemetry. Honored only with host networking or explicit -p.
-EXPOSE 11434 1234 4000 14318
+# PAIR node telemetry, the Console, the Harness. Honored only with host
+# networking or explicit -p.
+EXPOSE 11434 1234 4000 14318 8770 3080
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=5 \
   CMD curl -fsS "${YM_HEALTHCHECK_URL}" >/dev/null || exit 1

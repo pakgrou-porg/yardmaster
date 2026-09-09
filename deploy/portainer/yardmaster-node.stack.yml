@@ -4,33 +4,23 @@
 # Yardmaster single node — Portainer stack. One Docker host = one node; deploy
 # this on each machine you want in the cluster and pair them with the PIN.
 #
-# Topology: the `ollama` service owns the network namespace; `yardmaster` (the
-# broker + proxy) and `yardmaster-console` share it (`network_mode:
-# service:ollama`). That is deliberate — the `yardmaster` entrypoint registers
-# the local engine as a manual node at `127.0.0.1:11434` (from
-# `YM_LOCAL_ENGINE_URL`), so engine and proxy must share loopback. It also holds
-# the broker's stdin open via a FIFO, so no `stdin_open` / `tty` is needed.
-# See docs/decisions/0024-container-sibling-engine-wiring.md.
+# THREE containers (ADR-0026), zero manual steps:
+#   ollama              the engine. Owns the network namespace.
+#   yardmaster          PAIR broker + proxy + the bundled Console + a LAN bridge.
+#                       Self-chowns its volume, drops to uid 10001.
+#   yardmaster-harness  `dsh web` auto-pointed at Yardmaster, behind Basic Auth.
 #
-# The proxy refuses non-loopback plaintext (403 — PAIR's security model). The
-# `yardmaster-lan-shim` socat sidecar forwards LAN traffic through loopback so
-# the proxy accepts it.
+# Ports (published on `ollama`):
+#   11435 -> LAN bridge -> 127.0.0.1:11435 proxy   inference clients
+#    8770  Yardmaster Console                       ${YM_BIND} (default 127.0.0.1)
+#    3080  DeepSeek Harness                         ${YM_BIND}
 #
-# Ports (all published on the `ollama` service, which owns the namespace):
-#   11435 -> yardmaster-lan-shim -> proxy   <-- point LAN inference clients here
-#    8770  the Yardmaster Console                (${YM_BIND}, default 127.0.0.1)
-#    3080  the DeepSeek Harness Web UI           (${YM_BIND}, default 127.0.0.1)
+# Env: YM_BIND (0.0.0.0 for LAN), YM_LAN_HOST (<this-host-ip>), YM_HARNESS_MODEL,
+#      YM_AUTH_USER / YM_AUTH_PASS (pre-seed; else a one-time setup page),
+#      YM_AUTH_DISABLED=1 (loopback dev only), OPENROUTER_API_KEY.
 #
-# LAN ACCESS: set stack env  YM_BIND=0.0.0.0  to expose the Console + Harness to
-# the LAN, and  YM_LAN_HOST=<this-host-ip>  so dsh trusts that authority.
-# AUTHENTICATION (recommended with YM_BIND=0.0.0.0): set  YM_AUTH_ENABLED=1
-# YM_AUTH_USER=<name>  YM_AUTH_PASS=<pw>  in the stack env / .env — adds HTTP
-# Basic Auth in front of BOTH the Console and the Harness, durable across
-# restarts. With it on, both refuse to start unless user+pass are set.
-# SECURITY without auth: anyone reaching :8770 can rewrite yardmaster.toml; dsh
-# runs model code behind only a token + cookie.
-#
-# CPU-only box: this stack. GPU box (ROCm/CUDA): see
+# AUTH IS ON BY DEFAULT — one admin credential (scrypt hash on the data volume)
+# protects both the Console and the Harness. GPU box (ROCm/CUDA): see
 # deploy/portainer/examples/framework-strix-halo.stack.yml.
 
 services:
@@ -38,17 +28,14 @@ services:
     image: docker.io/ollama/ollama:latest
     container_name: yardmaster-ollama
     restart: unless-stopped
-    ipc: host
     environment:
-      OLLAMA_HOST: "127.0.0.1:11434"     # loopback inside the shared namespace
+      OLLAMA_HOST: "127.0.0.1:11434"
       OLLAMA_KEEP_ALIVE: "30m"
-      OLLAMA_MAX_LOADED_MODELS: "3"
-      OLLAMA_NUM_PARALLEL: "4"
     ports:
-      - "11435:11430"                          # inference proxy -> LAN
-      - "${YM_BIND:-127.0.0.1}:8770:8770"      # Console
-      - "${YM_BIND:-127.0.0.1}:3080:3081"      # DeepSeek Harness UI
-      # - "11434:11434"                        # uncomment for Ollama direct
+      - "11435:11430"                              # inference proxy -> LAN
+      - "${YM_BIND:-127.0.0.1}:8770:8770"          # Yardmaster Console
+      - "${YM_BIND:-127.0.0.1}:3080:3081"          # DeepSeek Harness
+      # - "11434:11434"                            # Ollama direct, optional
     volumes:
       - ollama-models:/root/.ollama
     healthcheck:
@@ -56,14 +43,6 @@ services:
       interval: 30s
       timeout: 10s
       retries: 5
-
-  yardmaster-init:
-    image: alpine:latest
-    container_name: yardmaster-init
-    command: sh -c "chown -R 10001:10001 /data /dshhome"
-    volumes:
-      - yardmaster-data:/data
-      - yardmaster-harness:/dshhome
 
   yardmaster:
     build:
@@ -74,104 +53,55 @@ services:
     container_name: yardmaster
     restart: unless-stopped
     network_mode: "service:ollama"
+    user: "0:0"                     # root to chown the volume, then drops to 10001
     depends_on:
-      yardmaster-init: { condition: service_completed_successfully }
       ollama: { condition: service_healthy }
     environment:
       NVPAIR_LOG_LEVEL: info
       YM_DATAPLANE_MODE: proxy
       YM_LOCAL_ENGINE_URL: http://127.0.0.1:11434
+      YM_PROXY_PORT: "11435"
+      YM_LAN_BRIDGE_PORT: "11430"
       YM_HEALTHCHECK_URL: http://127.0.0.1:11435/api/tags
-    volumes:
-      - yardmaster-data:/data
-
-  # Loopback -> LAN bridge for the proxy (see the header comment).
-  yardmaster-lan-shim:
-    image: alpine/socat:latest
-    container_name: yardmaster-lan-shim
-    restart: unless-stopped
-    network_mode: "service:ollama"
-    depends_on:
-      yardmaster: { condition: service_started }
-    command: ["-d", "TCP-LISTEN:11430,fork,reuseaddr", "TCP:127.0.0.1:11435"]
-
-  # DeepSeek Harness Web UI. dsh binds 127.0.0.1 only (it executes model code).
-  # The entrypoint captures dsh's announced URL (with its per-boot launch token)
-  # to $DSH_HOME/web-url so the Console links to the current one. DSH_HOME is a
-  # dedicated volume so the signed-cookie secret persists -> the browser session
-  # survives restarts (paste the tokened URL once per browser).
-  yardmaster-harness:
-    image: yardmaster:proxy-local        # already bundles dsh + node
-    container_name: yardmaster-harness
-    restart: unless-stopped
-    network_mode: "service:ollama"
-    depends_on:
-      yardmaster-init: { condition: service_completed_successfully }
-      yardmaster: { condition: service_started }
-    entrypoint: ["/usr/bin/tini", "--", "/usr/local/bin/yardmaster-harness-entrypoint"]
-    environment:
-      DSH_HOME: /dshhome
-      YM_HARNESS_PORT: "3080"
-      YM_HARNESS_TRUSTED_HOSTS: "127.0.0.1:3080 ${YM_LAN_HOST:-}:3080"
-      # `dsh web` does NOT accept `--set` (top-level `dsh` flag) — passing it
-      # crash-loops the service. Configure the model in
-      # /dshhome/profiles/web/cordis.patch.yml or the in-UI Settings.
-      # YM_HARNESS_EXTRA_ARGS: ""
-    volumes:
-      - yardmaster-harness:/dshhome
-
-  # Forwards 3081 -> 127.0.0.1:3080 (dsh refuses 0.0.0.0) and, when
-  # YM_AUTH_ENABLED=1, gates it behind HTTP Basic Auth (user + password from the
-  # stack env — durable across restarts). Auth off = transparent pass-through.
-  # Proxies the dsh client's WebSocket upgrade.
-  yardmaster-harness-proxy:
-    image: yardmaster:proxy-local        # bundles node + the auth-proxy script
-    container_name: yardmaster-harness-proxy
-    restart: unless-stopped
-    network_mode: "service:ollama"
-    depends_on:
-      yardmaster-harness: { condition: service_started }
-    entrypoint: ["/usr/bin/tini", "--", "node", "/opt/yardmaster/lib/yardmaster-auth-proxy.mjs"]
-    environment:
-      AP_LISTEN_PORT: "3081"
-      AP_TARGET_HOST: "127.0.0.1"
-      AP_TARGET_PORT: "3080"
-      AP_REALM: "Yardmaster Harness"
-      AP_AUTH_ENABLED: "${YM_AUTH_ENABLED:-0}"
-      AP_AUTH_USER: "${YM_AUTH_USER:-}"
-      AP_AUTH_PASS: "${YM_AUTH_PASS:-}"
-
-  yardmaster-console:
-    build:
-      context: "https://github.com/pakgrou-porg/yardmaster.git#main"
-      dockerfile: packages/yardmaster-console/Dockerfile
-    image: yardmaster-console:local
-    container_name: yardmaster-console
-    restart: unless-stopped
-    network_mode: "service:ollama"
-    depends_on:
-      yardmaster: { condition: service_started }
-      yardmaster-harness: { condition: service_started }
-    environment:
       YM_CONSOLE_PORT: "8770"
       YM_CONSOLE_BIND: 0.0.0.0
-      YM_LOCAL_ENGINE_URL: http://127.0.0.1:11434
-      YM_AGENT_URL: http://127.0.0.1:3080        # fallback; host derived from the request
+      YM_AGENT_PORT: "3080"
       YM_HARNESS_URL_FILE: /dshhome/web-url
       YM_CONFIG_PATH: /config/yardmaster.toml
       YM_CONFIG_FALLBACK: "/data/Nvidia Corporation/Personal AI Router/yardmaster.toml"
       YM_METRICS_DB: "/data/Nvidia Corporation/Personal AI Router/yardmaster-metrics.db"
-      # HTTP Basic Auth — same toggle + credentials as the Harness proxy.
-      YM_AUTH_ENABLED: "${YM_AUTH_ENABLED:-0}"
       YM_AUTH_USER: "${YM_AUTH_USER:-}"
       YM_AUTH_PASS: "${YM_AUTH_PASS:-}"
-      YM_AUTH_REALM: "Yardmaster Console"
+      YM_AUTH_DISABLED: "${YM_AUTH_DISABLED:-}"
+      OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
     volumes:
       - yardmaster-data:/data
       - yardmaster-harness:/dshhome:ro
-      # Manage yardmaster.toml from the host (keep :ro,Z for SELinux). The
-      # Console writes the data-dir fallback copy when this is read-only.
+      # Manage yardmaster.toml from the host (keep :ro,Z for SELinux):
       # - /etc/yardmaster/yardmaster.toml:/config/yardmaster.toml:ro,Z
+
+  yardmaster-harness:
+    image: yardmaster:proxy-local        # same image — overrides the entrypoint
+    container_name: yardmaster-harness
+    restart: unless-stopped
+    network_mode: "service:ollama"
+    user: "0:0"
+    entrypoint: ["/usr/bin/tini", "--", "/usr/local/bin/yardmaster-harness-entrypoint"]
+    depends_on:
+      ollama: { condition: service_healthy }
+      yardmaster: { condition: service_started }
+    environment:
+      DSH_HOME: /dshhome
+      YM_HARNESS_PORT: "3080"
+      YM_HARNESS_PROXY_PORT: "3081"
+      YM_HARNESS_TRUSTED_HOSTS: "127.0.0.1:3080 ${YM_LAN_HOST:-}:3080"
+      YM_HARNESS_UPSTREAM: http://127.0.0.1:11435/v1
+      YM_HARNESS_MODEL: "${YM_HARNESS_MODEL:-llama3.2:latest}"
+      YM_AUTH_USER: "${YM_AUTH_USER:-}"
+      YM_AUTH_PASS: "${YM_AUTH_PASS:-}"
+    volumes:
+      - yardmaster-harness:/dshhome
+      - yardmaster-data:/data:ro                    # read the shared admin credential
 
 volumes:
   ollama-models: { name: yardmaster-ollama-models }

@@ -36,4 +36,5 @@ and that every row points at a file that exists.
 | [0022](0022-headless-container-deployment.md) | Headless container deployment: one node per host, host networking, engines out of the container | accepted |
 | [0023](0023-yardmaster-console.md) | A minimal standalone web console for the interim | accepted |
 | [0024](0024-container-sibling-engine-wiring.md) | Containerised runtime-proxy fronts a sibling engine via manual-node injection | accepted |
-| [0025](0025-console-and-harness-basic-auth.md) | Opt-in HTTP Basic Auth for the Console and the Harness | accepted |
+| [0025](0025-console-and-harness-basic-auth.md) | Opt-in HTTP Basic Auth for the Console and the Harness | superseded by 0026 |
+| [0026](0026-three-container-stack-and-first-run-auth.md) | Three-container stack, bundled Console, first-run admin credential | accepted |

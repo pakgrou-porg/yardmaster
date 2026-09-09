@@ -22,7 +22,7 @@ Worked, machine-specific walkthrough:
 | `yardmaster` `--target runtime-proxy` (Go workers) | builds today; PAIR-style Ollama proxy on `:11435` |
 | `yardmaster` `--target runtime` (adds Rust data plane) | blocked on [#36](https://github.com/pakgrou-porg/yardmaster/issues/36) |
 | `YM_DATAPLANE_MODE=dataplane` (Switchyard routing, `[routes]`/`[providers]`, `:4000` Anthropic) | blocked on [#26](https://github.com/pakgrou-porg/yardmaster/issues/26) |
-| `yardmaster-console` (Config / Backends / Metrics / Agent) | works today; Metrics fills in with the data plane |
+| `yardmaster-console` (Config / Backends / Metrics / Agent) | works today, **bundled into the `yardmaster` container** (ADR-0026); Metrics fills in with the data plane |
 | plaintext routing through the proxy to an unmanaged sibling engine | [#47](https://github.com/pakgrou-porg/yardmaster/issues/47) |
 
 ## Deployment model
@@ -31,69 +31,75 @@ Worked, machine-specific walkthrough:
 paired with the PIN. The container runs the **router and console**, not the
 engines — run engines as their own service/host and Yardmaster fronts them.
 
-## Topology: one shared network namespace
+## Topology: three containers, one namespace (ADR-0026)
+
+| Container | Runs |
+| --- | --- |
+| `ollama` (or any engine) | the engine. **Owns the network namespace**; every published port is declared here. |
+| `yardmaster` | `nvpair-ui-broker` + Go workers (Ollama proxy on `:11435`) + **the bundled Console** (`:8770`) + a LAN bridge (`:11430 → :11435`). |
+| `yardmaster-harness` | `dsh web` (`:3080`, loopback) + its Basic-Auth reverse proxy (`:3081`). Separate because it runs model-generated code. |
 
 The `yardmaster` entrypoint registers the local engine as a **manual node** at
-`127.0.0.1:11434` (parsed from `YM_LOCAL_ENGINE_URL`) so the containerised proxy
-gets a routing target — see
-[ADR-0024](decisions/0024-container-sibling-engine-wiring.md). Engine and proxy
-must therefore share loopback: the stacks put the **`ollama`** service in charge
-of the namespace and run `yardmaster` and `yardmaster-console` with
-`network_mode: service:ollama`. Every published port is declared on the `ollama`
-service. The entrypoint also holds the broker's stdin open via a FIFO, so **no
-`stdin_open` / `tty` is needed** (an older revision of these docs said
-otherwise).
+`127.0.0.1:11434` (from `YM_LOCAL_ENGINE_URL`), so engine and router share
+loopback: the two Yardmaster containers run `network_mode: service:ollama`. Each
+starts as root (`user: "0:0"`), chowns its named volume, then drops to uid 10001
+— **no init container**. Each supervises its children and exits (Docker restarts
+the unit) if any dies. The broker's stdin is held open on a FIFO, so **no
+`stdin_open` / `tty`**. See
+[ADR-0024](decisions/0024-container-sibling-engine-wiring.md) for the engine
+wiring.
 
 ## The port model (read this)
 
 | Port | Who listens | Publish? |
 | --- | --- | --- |
-| `11434` | the engine (Ollama), on loopback in the namespace | optional (`"11434:11434"`) for engine-direct |
-| `11435` | the Yardmaster **proxy** — its headless default | **no** — loopback-only for plaintext (403 otherwise) |
-| `11430` | `yardmaster-lan-shim` (`socat`) → `127.0.0.1:11435` | **yes** — `"11435:11430"`; this is the LAN entry point |
-| `8770` | the Yardmaster **Console** | `"${YM_BIND:-127.0.0.1}:8770:8770"` — loopback unless you opt into LAN |
-| `4000` | the data plane's Anthropic + `/health` + `/metrics` | only meaningful in `dataplane` mode |
+| `11434` | the engine (Ollama), loopback in the namespace | optional (`"11434:11434"`) for engine-direct |
+| `11435` | the Yardmaster **proxy** | **no** — loopback-only for plaintext (403 otherwise) |
+| `11430` | the LAN bridge (in `yardmaster`) → `127.0.0.1:11435` | **yes** — `"11435:11430"`; the LAN entry point for inference |
+| `8770` | the bundled **Console** | `"${YM_BIND:-127.0.0.1}:8770:8770"` |
+| `3081` | the Harness **auth proxy** (in `yardmaster-harness`) → `127.0.0.1:3080` | `"${YM_BIND:-127.0.0.1}:3080:3081"` — dsh won't bind `0.0.0.0` |
+| `3080` | `dsh web`, loopback | via the auth proxy above |
+| `4000` | the data plane's Anthropic + `/health` + `/metrics` | only in `dataplane` mode |
 | `14318` | PAIR node telemetry (plaintext) | **never** publish off-host |
-| `3081` | `yardmaster-harness-proxy` (Node HTTP+WS reverse proxy; optional Basic Auth) → `127.0.0.1:3080` | `"${YM_BIND:-127.0.0.1}:3080:3081"` — dsh won't bind `0.0.0.0` itself |
-| `3080` | the **`yardmaster-harness`** service (`dsh web`), in-namespace loopback | via the proxy above |
 
 **The proxy refuses non-loopback plaintext with `403`** (PAIR's security model;
-`docs/security.md`). Only paired cluster peers reach it over the LAN, via mTLS.
-The `yardmaster-lan-shim` sidecar bridges the gap for a plain LAN client: it
-runs in the same namespace, so its forwarded connection originates from
-`127.0.0.1` and the proxy serves it.
+`docs/security.md`). The LAN bridge makes a fresh `127.0.0.1` connection so plain
+LAN clients on published `:11435` are served.
 
-Common mistakes: putting the engine on `11435` (collides with the proxy → the
-broker refuses to wire it); expecting the proxy on `11434`; publishing the
-proxy port directly and getting `403` from every LAN client.
+Common mistakes: engine on `11435` (collides with the proxy); expecting the
+proxy on `11434`; publishing the raw proxy port and getting `403` from every LAN
+client.
 
 ## Stacks
 
 | File | Use |
 | --- | --- |
-| [`deploy/portainer/yardmaster-node.stack.yml`](../deploy/portainer/yardmaster-node.stack.yml) | single node: `ollama` + `yardmaster` + `yardmaster-console`, shared namespace. The normal case. |
+| [`deploy/portainer/yardmaster-node.stack.yml`](../deploy/portainer/yardmaster-node.stack.yml) | single node: `ollama` + `yardmaster` + `yardmaster-harness`. The normal case. |
 | [`deploy/portainer/yardmaster-bridge.stack.yml`](../deploy/portainer/yardmaster-bridge.stack.yml) | Docker Swarm / no shared-namespace. **No auto-advertise, no mDNS** — manual config only. |
-| [`deploy/portainer/examples/framework-strix-halo.stack.yml`](../deploy/portainer/examples/framework-strix-halo.stack.yml) | the node stack with ROCm GPU access, tuned for a Framework Desktop / 128 GB. |
+| [`deploy/portainer/examples/framework-strix-halo.stack.yml`](../deploy/portainer/examples/framework-strix-halo.stack.yml) | the node stack with ROCm GPU access, tuned for a Framework Desktop / 128 GB. Ships an OpenRouter-enabled `yardmaster.toml.example`. |
 
 Deploy in Portainer with **Stacks → Add stack → Repository** (URL
 `https://github.com/pakgrou-porg/yardmaster`, ref `refs/heads/main`, the compose
-path above). The first deploy builds `yardmaster` and `yardmaster-console` from
-the repo.
+path above). The first deploy builds `yardmaster` from the repo (Go workers +
+bundled Console).
 
 ## Persistent state
 
-Everything lives under `/data` (one named volume). PAIR layout inside it:
+Two named volumes:
 
 ```
-/data/Nvidia Corporation/Personal AI Router/
-├── cluster/            node.crt, node.key, trusted/   ← the mTLS identity + pins
-├── yardmaster.toml     (or symlinked from a :ro bind mount at /config)
-├── yardmaster-metrics.db
-└── logs/
+yardmaster-data      -> /data     (yardmaster container)
+  Nvidia Corporation/Personal AI Router/
+  ├── cluster/               node.crt, node.key, trusted/   ← mTLS identity + pins
+  ├── yardmaster.toml        (or symlinked from a :ro bind mount at /config)
+  ├── yardmaster-metrics.db
+  ├── console-auth.json      ← the admin credential (scrypt hash)
+  └── logs/
+yardmaster-harness   -> /dshhome  (yardmaster-harness container; mounted :ro in yardmaster)
+  profiles/web/cordis.patch.yml   ← auto-written dsh config; sessions; cookie secret; web-url
 ```
 
-`yardmaster-init` (an ephemeral `alpine`) runs `chown -R 10001:10001 /data` so
-the non-root containers can write.
+Each entrypoint chowns its own volume on start — no `yardmaster-init`.
 
 Back it up — losing `cluster/` means re-pairing:
 
@@ -118,10 +124,14 @@ See [routing.md](routing.md) and [providers.md](providers.md).
 ## The Dockerfile targets
 
 ```
-docker build -f docker/Dockerfile --target runtime-proxy -t yardmaster:proxy .   # today
-docker build -f docker/Dockerfile                          -t yardmaster:full  .   # needs #36
-docker build -f packages/yardmaster-console/Dockerfile     -t yardmaster-console .
+docker build -f docker/Dockerfile --target runtime-proxy -t yardmaster:proxy .   # today (Go workers + Console + dsh)
+docker build -f docker/Dockerfile                          -t yardmaster:full  .   # adds the Rust data plane; needs #36
 ```
+
+The `yardmaster` and `yardmaster-harness` services use the **same image** — the
+harness service just overrides the entrypoint. The standalone
+`packages/yardmaster-console/Dockerfile` still builds the Console alone if you
+want it separately.
 
 ## Pairing two containerized nodes
 
@@ -134,34 +144,29 @@ docker exec -it yardmaster /opt/yardmaster/bin/nvpair-tui
 
 ## The agent (DeepSeek Harness)
 
-The **`yardmaster-harness`** service runs `dsh web` on in-namespace loopback
-`:3080` (dsh refuses `0.0.0.0` — it executes model code), published via the
-**`yardmaster-harness-proxy`** sidecar — a small dependency-free Node HTTP +
-WebSocket reverse proxy (`docker/auth-proxy.mjs`) that replaces the old `socat`
-shim and adds optional Basic Auth. The harness entrypoint
-(`docker/harness-entrypoint.sh`) writes the current tokened URL to
-`$DSH_HOME/web-url`, which the Console mounts `:ro` and links from its **Agent**
-tab (rewriting the host to match your request, so the link works from loopback
-and LAN).
+`yardmaster-harness` runs `dsh web` on loopback `:3080` (dsh refuses `0.0.0.0` —
+it executes model code), published via its **auth-proxy** child
+(`docker/auth-proxy.mjs`, a dependency-free Node HTTP + WebSocket reverse proxy).
 
-**Token persistence.** dsh mints a new launch token each start but sets a signed
-cookie from a secret in `DSH_HOME`. Mount a dedicated volume at `/dshhome`
-(`DSH_HOME=/dshhome`, chowned to `10001` by `yardmaster-init`) so that secret,
-sessions, and credentials survive restarts — the browser stays logged in.
+**Auto-configured for Yardmaster.** The entrypoint writes
+`$DSH_HOME/profiles/web/cordis.patch.yml` (marker on line 1) configuring
+`@deepseek-ai/dsh-llm-pi-ai` with a `yardmaster` route
+(`baseURL: http://127.0.0.1:11435/v1`, `api: openai-completions`, `models:` from
+`YM_HARNESS_MODELS`) and `agent-default-model` = that route + `YM_HARNESS_MODEL`
+(default `llama3.2:latest`). `dsh` therefore routes every request through the
+Yardmaster proxy with no manual step. A hand-written overlay without the marker
+on line 1 is left untouched. `dsh web` does **not** accept `--set`.
 
-**Model config.** `dsh web` only accepts `--host` / `--port` / `--trusted-host`
-/ `--no-open` — **not `--set`** (that's a top-level `dsh` flag; passing it via
-`YM_HARNESS_EXTRA_ARGS` crash-loops the service). Set the default model in the
-Settings UI or `$DSH_HOME/profiles/web/cordis.patch.yml` (see the Strix Halo doc
-§7). The dsh child inherits an environment stripped of `*_API_KEY` / `*_TOKEN` /
-`*_SECRET` (ADR-0016).
+**Persistence.** `DSH_HOME` is the dedicated `yardmaster-harness` volume, so the
+signed-cookie secret, sessions, and credentials survive restarts. The entrypoint
+also writes the current tokened URL to `$DSH_HOME/web-url`; the `yardmaster`
+container mounts that volume `:ro` and its Console **Agent** tab embeds/links it
+(host rewritten to match your request).
 
 **LAN + auth.** `${YM_BIND:-127.0.0.1}` gates the published `:8770`/`:3080`. Set
-`YM_BIND=0.0.0.0` and `YM_LAN_HOST=<host-ip>` (added to dsh's `--trusted-host`)
-to reach both from the LAN. Set `YM_AUTH_ENABLED=1` + `YM_AUTH_USER` +
-`YM_AUTH_PASS` (or `YM_AUTH_PASS_FILE`) to require HTTP Basic Auth on both the
-Console and the Harness proxy — credentials come from the stack env, so they are
-durable across restarts, and both services refuse to start enabled-but-open.
+`YM_BIND=0.0.0.0` + `YM_LAN_HOST=<host-ip>` for the LAN. Auth is **on by
+default** and shared (see below) — the harness proxy verifies the same
+credential and returns `503` until it exists.
 
 ## Upgrades
 
@@ -169,20 +174,33 @@ Pin the build ref / image tag; redeploy. The `/data` volume carries identity and
 config across the upgrade. `#main` tracks `main` — don't rely on it for anything
 you care about.
 
+## Authentication (ADR-0026)
+
+One admin credential (scrypt hash at
+`/data/Nvidia Corporation/Personal AI Router/console-auth.json`, survives
+restarts) protects **both** the Console and the Harness. **On by default:**
+
+- No credential configured → the Console serves a one-time setup page and
+  refuses everything else; the Harness proxy returns `503`.
+- `YM_AUTH_USER` + `YM_AUTH_PASS` (or `YM_AUTH_PASS_FILE`) pre-seed it from the
+  stack env instead of the setup page.
+- `YM_AUTH_DISABLED=1` turns it off entirely — **loopback dev only**.
+- `/healthz` is always open. `dsh` keeps its own launch-token + cookie
+  underneath.
+
+Do the first-run setup with `YM_BIND=127.0.0.1`, then open the LAN.
+
 ## Security notes specific to containers
 
-- Plaintext inference ingress is loopback-only **inside the namespace**; the
-  proxy port you publish (`11435`) is the LAN entry point.
-- Images run as non-root (`uid 10001`). The Console can write `yardmaster.toml`;
-  it never handles API keys and never reads prompt/response content.
-- Node telemetry `14318` is plaintext (inherited from PAIR). `[cluster]
-  telemetry_auth = "mtls"` on shared networks.
-- The Console and Harness have **no authentication by default** (the Harness has
-  a launch token + signed cookie only). Set `YM_AUTH_ENABLED=1` + `YM_AUTH_USER`
-  + `YM_AUTH_PASS` to require HTTP Basic Auth on both — strongly recommended
-  whenever `YM_BIND=0.0.0.0`. For TLS / SSO, front them with a real reverse
-  proxy instead and keep `YM_BIND=127.0.0.1`.
-- Never publish `14318` to any untrusted network.
+- Plaintext inference ingress is loopback-only; the published `:11435` (via the
+  LAN bridge) is the entry point.
+- The two Yardmaster containers start as root only to chown their volume, then
+  drop to `uid 10001`. The Console writes `yardmaster.toml` + the auth file; it
+  never handles provider API keys and never reads prompt/response content.
+- Node telemetry `14318` is plaintext (inherited from PAIR); `[cluster]
+  telemetry_auth = "mtls"` on shared networks. Never publish it.
+- HTTP Basic Auth is cleartext over HTTP. For TLS / SSO, keep
+  `YM_BIND=127.0.0.1` and put a real reverse proxy in front.
 
 ## Known gaps
 

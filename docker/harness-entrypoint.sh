@@ -2,65 +2,143 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 Karl Miller
 # SPDX-License-Identifier: Apache-2.0
 #
-# Runs the DeepSeek Harness Web UI and captures the URL it announces
-# (which carries a per-boot launch token) to $DSH_HOME/web-url, so the
-# Yardmaster Console can link straight to the current one.
+# The DeepSeek Harness container: runs `dsh web` (loopback only — it executes
+# model-generated code and refuses 0.0.0.0) behind a Basic-Auth reverse proxy,
+# and auto-configures dsh to send every request through the Yardmaster proxy.
 #
-# dsh only binds 127.0.0.1 (it executes model-generated code and refuses
-# 0.0.0.0). LAN exposure is done by publishing this container's port through the
-# namespace owner; dsh's browser-trust fence then needs each non-loopback
-# authority in YM_HARNESS_TRUSTED_HOSTS (space-separated host[:port]).
+#   - self-chowns the DSH_HOME volume, then drops to uid 10001
+#   - writes $DSH_HOME/profiles/web/cordis.patch.yml so dsh's default model is
+#     served by the Yardmaster proxy (pi-ai "yardmaster" route). A file you
+#     wrote yourself (no manage-marker on line 1) is left untouched.
+#   - captures dsh's announced URL (with its per-boot launch token) to
+#     $DSH_HOME/web-url so the Console can link straight to it
+#   - runs docker/auth-proxy.mjs on YM_HARNESS_PROXY_PORT -> 127.0.0.1:PORT,
+#     sharing the admin credential the Console sets up on first run
+#
+# Env: DSH_HOME, YM_HARNESS_PORT (3080), YM_HARNESS_PROXY_PORT (3081),
+#      YM_HARNESS_TRUSTED_HOSTS (space-separated host[:port]),
+#      YM_HARNESS_UPSTREAM (http://127.0.0.1:11435/v1),
+#      YM_HARNESS_MODEL (llama3.2:latest),
+#      YM_HARNESS_EXTRA_ARGS (extra `dsh web` flags only),
+#      YM_AUTH_FILE, YM_AUTH_USER/YM_AUTH_PASS (proxy Basic Auth).
 set -eu
 
 : "${DSH_HOME:=/dshhome}"
+
+# --- drop privileges once, after fixing volume ownership -------------------
+if [ "$(id -u)" = "0" ]; then
+  mkdir -p "${DSH_HOME}"
+  chown -R 10001:10001 "${DSH_HOME}" 2>/dev/null || true
+  exec gosu 10001:10001 "$0" "$@"
+fi
+
 : "${YM_HARNESS_PORT:=3080}"
+: "${YM_HARNESS_PROXY_PORT:=3081}"
 : "${YM_HARNESS_TRUSTED_HOSTS:=127.0.0.1:${YM_HARNESS_PORT}}"
+: "${YM_HARNESS_UPSTREAM:=http://127.0.0.1:11435/v1}"
+: "${YM_HARNESS_MODEL:=llama3.2:latest}"
+# pi-ai needs a hand-declared gateway's models listed. Default = just the
+# default model; add more with YM_HARNESS_MODELS="a,b,c".
+: "${YM_HARNESS_MODELS:=${YM_HARNESS_MODEL}}"
+case ",${YM_HARNESS_MODELS}," in
+  *",${YM_HARNESS_MODEL},"*) ;;
+  *) YM_HARNESS_MODELS="${YM_HARNESS_MODEL},${YM_HARNESS_MODELS}" ;;
+esac
+: "${YM_AUTH_FILE:=/data/Nvidia Corporation/Personal AI Router/console-auth.json}"
+
 DSH_BIN=/opt/yardmaster/node_modules/@deepseek-ai/dsh/lib/bin.js
+AUTH_PROXY=/opt/yardmaster/lib/yardmaster-auth-proxy.mjs
 URL_FILE="${DSH_HOME}/web-url"
+PROFILE="${DSH_HOME}/profiles/web"
+PATCH="${PROFILE}/cordis.patch.yml"
+MARKER="# managed by yardmaster-harness-entrypoint"
 
 mkdir -p "${DSH_HOME}"
 : > "${URL_FILE}" || true
 
-# Guard the profile overlay. dsh requires cordis.patch.yml to be a top-level YAML
-# array; an empty or blank file (a common result of writing it with a heredoc
-# piped into `docker run` WITHOUT -i) makes dsh exit "must be a top-level YAML
-# array of loader patch entries" and the service crash-loops. If the file exists
-# but has no non-comment, non-whitespace content, reset it to an empty array.
-PATCH="${DSH_HOME}/profiles/web/cordis.patch.yml"
-if [ -f "${PATCH}" ] && ! grep -qE '^[[:space:]]*[^#[:space:]]' "${PATCH}"; then
-  echo "yardmaster-harness: WARNING ${PATCH} is empty/blank — resetting to []" >&2
-  printf '[]\n' > "${PATCH}"
+# --- let dsh scaffold the profile, then write our overlay -----------------
+node "${DSH_BIN}" --profile web --dump-default-config >/dev/null 2>&1 || true
+mkdir -p "${PROFILE}"
+
+write_overlay=1
+if [ -f "${PATCH}" ] && ! head -n 1 "${PATCH}" | grep -qF "${MARKER}"; then
+  # Not ours. Keep it only if it holds real patch entries — treat dsh's default
+  # boilerplate (comments + an empty "[]" array) and a blank file as overwritable.
+  residue="$(sed 's/#.*//' "${PATCH}" | tr -d '[:space:]')"
+  if [ -n "${residue}" ] && [ "${residue}" != "[]" ]; then
+    write_overlay=0
+    echo "yardmaster-harness: keeping your custom ${PATCH}"
+  fi
+fi
+if [ "${write_overlay}" = "1" ]; then
+  {
+    printf '%s\n' "${MARKER} — delete this line to keep your own edits"
+    printf '%s\n' "- id: llm-pi-ai"
+    printf '%s\n' "  config:"
+    printf '%s\n' "    providers:"
+    printf '%s\n' "      yardmaster:"
+    printf '%s\n' "        displayName: Yardmaster"
+    printf '%s\n' "        baseURL: ${YM_HARNESS_UPSTREAM}"
+    printf '%s\n' "        api: openai-completions"
+    printf '%s\n' "        models:"
+    OLDIFS=$IFS; IFS=','
+    for m in ${YM_HARNESS_MODELS}; do
+      [ -n "${m}" ] && printf '          - id: %s\n' "${m}"
+    done
+    IFS=$OLDIFS
+    printf '%s\n' "- id: agent-default-model"
+    printf '%s\n' "  config:"
+    printf '%s\n' "    provider: yardmaster"
+    printf '%s\n' "    model: ${YM_HARNESS_MODEL}"
+  } > "${PATCH}"
+  echo "yardmaster-harness: dsh -> yardmaster proxy ${YM_HARNESS_UPSTREAM} (models: ${YM_HARNESS_MODELS}; default ${YM_HARNESS_MODEL})"
 fi
 
+# --- build the `dsh web` argv -------------------------------------------
 set -- web --no-open --host 127.0.0.1 --port "${YM_HARNESS_PORT}"
 for h in ${YM_HARNESS_TRUSTED_HOSTS}; do
-  case "${h}" in "" | :* ) continue ;; esac   # skip empty / ":3080" from an unset YM_LAN_HOST
+  case "${h}" in "" | :* ) continue ;; esac
   set -- "$@" --trusted-host "${h}"
 done
-# Extra args (must be `dsh web` flags: --host / --port / --trusted-host / --no-open).
-# `dsh web` does NOT accept `--set` — that is a top-level `dsh` flag and passing it
-# here makes dsh exit ("unknown option '--set'") and the service crash-loops.
-# Strip a leading `--set KEY=VAL` (or `--set=KEY=VAL`) pair with a loud warning so
-# an old stack file can't take the Harness down. Configure the default model via
-# $DSH_HOME/profiles/web/cordis.patch.yml or the in-UI Settings instead.
+# `dsh web` accepts only --host/--port/--trusted-host/--no-open. Drop a stray
+# `--set` (a top-level `dsh` flag) so an old stack file can't crash-loop us.
 skip_next=0
 for a in ${YM_HARNESS_EXTRA_ARGS:-}; do
   if [ "${skip_next}" = 1 ]; then skip_next=0; continue; fi
   case "${a}" in
-    --set)   echo "yardmaster-harness: WARNING dropping unsupported '--set' arg (see cordis.patch.yml)" >&2; skip_next=1; continue ;;
-    --set=*) echo "yardmaster-harness: WARNING dropping unsupported '${a}' arg (see cordis.patch.yml)" >&2; continue ;;
+    --set)   echo "yardmaster-harness: WARNING dropping unsupported '--set' (see cordis.patch.yml)" >&2; skip_next=1; continue ;;
+    --set=*) echo "yardmaster-harness: WARNING dropping unsupported '${a}'" >&2; continue ;;
   esac
   set -- "$@" "${a}"
 done
 
+# --- run dsh + the auth proxy, supervise both -------------------------
 echo "yardmaster-harness: node ${DSH_BIN} $*"
-node "${DSH_BIN}" "$@" 2>&1 | while IFS= read -r line; do
-  printf '%s\n' "${line}"
-  case "${line}" in
-    *"dsh web: http"*)
-      printf '%s\n' "${line##*dsh web: }" > "${URL_FILE}.tmp" 2>/dev/null \
-        && mv "${URL_FILE}.tmp" "${URL_FILE}" \
-        && echo "yardmaster-harness: wrote ${URL_FILE}"
-      ;;
-  esac
+(
+  node "${DSH_BIN}" "$@" 2>&1 | while IFS= read -r line; do
+    printf '%s\n' "${line}"
+    case "${line}" in
+      *"dsh web: http"*)
+        printf '%s\n' "${line##*dsh web: }" > "${URL_FILE}.tmp" 2>/dev/null \
+          && mv "${URL_FILE}.tmp" "${URL_FILE}" \
+          && echo "yardmaster-harness: wrote ${URL_FILE}"
+        ;;
+    esac
+  done
+) &
+DSH_PID=$!
+
+AP_LISTEN_PORT="${YM_HARNESS_PROXY_PORT}" \
+AP_TARGET_HOST=127.0.0.1 AP_TARGET_PORT="${YM_HARNESS_PORT}" \
+AP_REALM="Yardmaster Harness" AP_AUTH_FILE="${YM_AUTH_FILE}" \
+  node "${AUTH_PROXY}" &
+AP_PID=$!
+
+trap 'kill "${DSH_PID}" "${AP_PID}" 2>/dev/null || true' TERM INT
+while kill -0 "${DSH_PID}" 2>/dev/null && kill -0 "${AP_PID}" 2>/dev/null; do
+  sleep 2
 done
+echo "yardmaster-harness: a child exited — stopping the container" >&2
+kill "${DSH_PID}" "${AP_PID}" 2>/dev/null || true
+wait 2>/dev/null || true
+exit 1

@@ -25,8 +25,8 @@
 import { createServer } from "node:http";
 import { readFile, writeFile, mkdir, access, lstat, unlink } from "node:fs/promises";
 import { constants as FS } from "node:fs";
-import { existsSync, readFileSync } from "node:fs";
-import { timingSafeEqual } from "node:crypto";
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { timingSafeEqual, scryptSync, randomBytes } from "node:crypto";
 import { join, extname, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
@@ -52,46 +52,83 @@ const cfg = {
   harnessUrlFile: process.env.YM_HARNESS_URL_FILE || "/dshhome/web-url",
   localEngineUrl: process.env.YM_LOCAL_ENGINE_URL || "",
   dataplaneBin: process.env.YM_DATAPLANE_BIN || "", // e.g. /opt/yardmaster/bin/yardmaster-dataplane
+  // Shared admin credential store — the Harness auth proxy reads the same file.
+  authFile:
+    process.env.YM_AUTH_FILE ||
+    "/data/Nvidia Corporation/Personal AI Router/console-auth.json",
+  authRealm: (process.env.YM_AUTH_REALM || "Yardmaster").replace(/"/g, ""),
 };
 
 /**
- * Optional HTTP Basic Auth. The admin opts in with YM_AUTH_ENABLED and supplies
- * a username + password via the environment (durable: they live in the Portainer
- * stack / .env, so they survive restarts). If enabled without both, we refuse to
- * start rather than run open.
+ * Authentication. ON by default: with no credential configured the Console
+ * serves a one-time setup page and refuses everything else until an admin
+ * picks a username + password (persisted to cfg.authFile on the /data volume,
+ * so it survives restarts). YM_AUTH_USER + YM_AUTH_PASS pre-seed it from the
+ * environment; YM_AUTH_DISABLED=1 turns auth off entirely (loopback dev only).
  */
 const truthy = (v) => v === "1" || v === "true" || v === "yes" || v === "on";
-function buildAuth() {
-  const enabled = truthy(process.env.YM_AUTH_ENABLED);
-  if (!enabled) return { enabled: false };
-  let pass = process.env.YM_AUTH_PASS || "";
-  if (process.env.YM_AUTH_PASS_FILE) {
-    pass = readFileSync(process.env.YM_AUTH_PASS_FILE, "utf8").replace(/\r?\n$/, "");
+const AUTH_DISABLED = truthy(process.env.YM_AUTH_DISABLED);
+const envUser = process.env.YM_AUTH_USER || "";
+let envPass = process.env.YM_AUTH_PASS || "";
+if (process.env.YM_AUTH_PASS_FILE) {
+  try {
+    envPass = readFileSync(process.env.YM_AUTH_PASS_FILE, "utf8").replace(/\r?\n$/, "");
+  } catch (e) {
+    throw new Error(`YM_AUTH_PASS_FILE unreadable: ${e.message}`);
   }
-  const user = process.env.YM_AUTH_USER || "";
-  if (!user || !pass) {
-    throw new Error(
-      "YM_AUTH_ENABLED is set but YM_AUTH_USER / YM_AUTH_PASS are empty — refusing to start open",
-    );
-  }
-  return {
-    enabled: true,
-    realm: (process.env.YM_AUTH_REALM || "Yardmaster Console").replace(/"/g, ""),
-    expected: Buffer.from("Basic " + Buffer.from(`${user}:${pass}`).toString("base64")),
-  };
 }
-const auth = buildAuth();
-/** true if the request may proceed; false means a 401 was already sent. */
-function passedAuth(req, res) {
-  if (!auth.enabled) return true;
-  const got = Buffer.from(String(req.headers["authorization"] || ""));
-  if (got.length === auth.expected.length && timingSafeEqual(got, auth.expected)) return true;
+const envCreds = envUser && envPass ? { user: envUser, pass: envPass } : null;
+
+const safeEq = (a, b) => {
+  const ba = Buffer.from(a);
+  const bb = Buffer.from(b);
+  return ba.length === bb.length && timingSafeEqual(ba, bb);
+};
+
+function readAuthFile() {
+  try {
+    const j = JSON.parse(readFileSync(cfg.authFile, "utf8"));
+    if (j && typeof j.user === "string" && typeof j.salt === "string" && typeof j.hash === "string") return j;
+  } catch {
+    /* not set up yet */
+  }
+  return null;
+}
+function writeAuthFile(user, password) {
+  const salt = randomBytes(16);
+  const hash = scryptSync(password, salt, 32);
+  mkdirSync(dirname(cfg.authFile), { recursive: true });
+  writeFileSync(
+    cfg.authFile,
+    JSON.stringify({ v: 1, user, salt: salt.toString("hex"), hash: hash.toString("hex"), created: new Date().toISOString() }, null, 2),
+    { mode: 0o600 },
+  );
+}
+/** "disabled" | "env" | "configured" | "setup" */
+function authState() {
+  if (AUTH_DISABLED) return "disabled";
+  if (envCreds) return "env";
+  return readAuthFile() ? "configured" : "setup";
+}
+function checkBasic(header) {
+  const m = /^Basic (.+)$/.exec(String(header || ""));
+  if (!m) return false;
+  const s = Buffer.from(m[1], "base64").toString("utf8");
+  const i = s.indexOf(":");
+  if (i < 0) return false;
+  const user = s.slice(0, i);
+  const pass = s.slice(i + 1);
+  if (envCreds) return safeEq(user, envCreds.user) && safeEq(pass, envCreds.pass);
+  const rec = readAuthFile();
+  if (!rec || !safeEq(user, rec.user)) return false;
+  return safeEq(scryptSync(pass, Buffer.from(rec.salt, "hex"), 32), Buffer.from(rec.hash, "hex"));
+}
+function challenge(res) {
   res.writeHead(401, {
-    "www-authenticate": `Basic realm="${auth.realm}", charset="UTF-8"`,
+    "www-authenticate": `Basic realm="${cfg.authRealm}", charset="UTF-8"`,
     "content-type": "text/plain",
   });
   res.end("401 Unauthorized\n");
-  return false;
 }
 
 const MIME = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".ico": "image/x-icon" };
@@ -161,13 +198,59 @@ function validateWithDataplane(raw) {
 async function handleApi(req, res, url) {
   if (url.pathname === "/healthz") return json(res, 200, { ok: true });
 
+  // First-run setup: create the admin credential. Allowed only while unconfigured.
+  if (url.pathname === "/api/setup" && req.method === "POST") {
+    if (authState() !== "setup") return json(res, 409, { ok: false, error: "already configured" });
+    let body;
+    try {
+      body = JSON.parse(await readBody(req));
+    } catch {
+      return json(res, 400, { ok: false, error: "invalid JSON" });
+    }
+    const user = String(body.user || "").trim();
+    const password = String(body.password || "");
+    if (!/^[A-Za-z0-9._-]{2,64}$/.test(user)) {
+      return json(res, 400, { ok: false, error: "username must be 2-64 chars: letters, digits, . _ -" });
+    }
+    if (password.length < 8) return json(res, 400, { ok: false, error: "password must be at least 8 characters" });
+    try {
+      writeAuthFile(user, password);
+    } catch (e) {
+      return json(res, 500, { ok: false, error: `could not write ${cfg.authFile}: ${e.message}` });
+    }
+    return json(res, 200, { ok: true });
+  }
+
+  // Change the password (must already be authenticated to reach here).
+  if (url.pathname === "/api/auth/password" && req.method === "POST") {
+    if (authState() === "env") {
+      return json(res, 409, { ok: false, error: "credentials come from YM_AUTH_USER/PASS env — change them there" });
+    }
+    if (authState() === "disabled") return json(res, 409, { ok: false, error: "auth is disabled" });
+    let body;
+    try {
+      body = JSON.parse(await readBody(req));
+    } catch {
+      return json(res, 400, { ok: false, error: "invalid JSON" });
+    }
+    const password = String(body.password || "");
+    if (password.length < 8) return json(res, 400, { ok: false, error: "password must be at least 8 characters" });
+    const rec = readAuthFile();
+    try {
+      writeAuthFile(rec.user, password);
+    } catch (e) {
+      return json(res, 500, { ok: false, error: e.message });
+    }
+    return json(res, 200, { ok: true });
+  }
+
   if (url.pathname === "/api/status") {
     return json(res, 200, {
       version: "0.1.0-console",
       config_path: cfg.configPath,
       metrics_db: cfg.metricsDb,
       metrics_present: existsSync(cfg.metricsDb),
-      auth_enabled: auth.enabled,
+      auth: authState(),
       agent_url: cfg.agentUrl,
       local_engine_url: cfg.localEngineUrl || null,
       dataplane_dry_run: !!(cfg.dataplaneBin && existsSync(cfg.dataplaneBin)),
@@ -277,12 +360,37 @@ async function serveStatic(res, pathname) {
   res.end(body);
 }
 
+/**
+ * Gate a request. Returns:
+ *   "ok"     — allowed through
+ *   "setup"  — unconfigured; caller should serve the setup page / allow /api/setup
+ * and otherwise writes a 401 challenge itself and returns "handled".
+ */
+function gate(req, res, url) {
+  const p = url.pathname;
+  if (p === "/healthz") return "ok"; // health probes: always open
+  const state = authState();
+  if (state === "disabled") return "ok";
+  if (state === "setup") {
+    if (p === "/api/setup") return "ok"; // create the credential
+    return "setup"; // everything else: show the setup form, refuse the rest
+  }
+  // "configured" | "env": require Basic Auth
+  if (checkBasic(req.headers["authorization"])) return "ok";
+  challenge(res);
+  return "handled";
+}
+
 export function createConsoleServer() {
   return createServer(async (req, res) => {
     try {
       const url = new URL(req.url, `http://${req.headers.host || "console"}`);
-      // /healthz stays open so container health probes work without credentials.
-      if (url.pathname !== "/healthz" && !passedAuth(req, res)) return;
+      const g = gate(req, res, url);
+      if (g === "handled") return;
+      if (g === "setup") {
+        if (url.pathname.startsWith("/api/")) return json(res, 403, { error: "setup required", setup: true });
+        return serveStatic(res, "/setup.html"); // any page -> the setup form
+      }
       if (url.pathname === "/healthz" || url.pathname.startsWith("/api/")) {
         await handleApi(req, res, url);
       } else {

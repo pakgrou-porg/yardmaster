@@ -3,9 +3,12 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, symlinkSync, existsSync, lstatSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, symlinkSync, existsSync, lstatSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+// Auth is ON by default now; the non-auth functional tests run with it disabled.
+process.env.YM_AUTH_DISABLED = "1";
 
 test("server: healthz, status, validate, config round-trip", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "ymc-"));
@@ -30,6 +33,7 @@ test("server: healthz, status, validate, config round-trip", async (t) => {
   const status = await (await fetch(`${base}/api/status`)).json();
   assert.equal(status.config_path, cfgPath);
   assert.equal(status.metrics_present, false);
+  assert.equal(status.auth, "disabled");
 
   const bad = await (
     await fetch(`${base}/api/config/validate`, { method: "POST", body: `[engines.x]\ntype="openai"\n` })
@@ -85,26 +89,28 @@ test("server: /api/agent serves the tokened URL, host derived from the request",
   assert.equal(lan.base, "http://10.9.8.7:3080");
 });
 
-test("server: Basic Auth gates everything except /healthz when YM_AUTH_ENABLED", async (t) => {
+test("server: env credentials (YM_AUTH_USER/PASS) gate everything except /healthz", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "ymc-"));
   writeFileSync(join(dir, "yardmaster.toml"), `schema_version = 1\n[targets]\n`);
   process.env.YM_CONFIG_PATH = join(dir, "yardmaster.toml");
   process.env.YM_CONFIG_FALLBACK = join(dir, "fallback.toml");
   process.env.YM_METRICS_DB = join(dir, "none.db");
-  process.env.YM_AUTH_ENABLED = "1";
+  process.env.YM_AUTH_FILE = join(dir, "console-auth.json");
+  delete process.env.YM_AUTH_DISABLED;
   process.env.YM_AUTH_USER = "karl";
-  process.env.YM_AUTH_PASS = "s3cret";
+  process.env.YM_AUTH_PASS = "s3cret-pw";
 
-  const { createConsoleServer } = await import(`../src/server.mjs?auth`);
+  const { createConsoleServer } = await import(`../src/server.mjs?authenv`);
   const srv = createConsoleServer();
   await new Promise((r) => srv.listen(0, "127.0.0.1", r));
   const base = `http://127.0.0.1:${srv.address().port}`;
   t.after(() => {
     srv.close();
     rmSync(dir, { recursive: true, force: true });
-    delete process.env.YM_AUTH_ENABLED;
     delete process.env.YM_AUTH_USER;
     delete process.env.YM_AUTH_PASS;
+    delete process.env.YM_AUTH_FILE;
+    process.env.YM_AUTH_DISABLED = "1";
   });
 
   assert.equal((await fetch(`${base}/healthz`)).status, 200, "health probe stays open");
@@ -118,25 +124,81 @@ test("server: Basic Auth gates everything except /healthz when YM_AUTH_ENABLED",
   });
   assert.equal(wrong.status, 401);
 
-  const right = await fetch(`${base}/api/status`, {
-    headers: { authorization: "Basic " + Buffer.from("karl:s3cret").toString("base64") },
+  const ok = await fetch(`${base}/api/status`, {
+    headers: { authorization: "Basic " + Buffer.from("karl:s3cret-pw").toString("base64") },
   });
-  assert.equal(right.status, 200);
-  assert.equal((await right.json()).auth_enabled, true);
-
-  const spa = await fetch(`${base}/`, {
-    headers: { authorization: "Basic " + Buffer.from("karl:s3cret").toString("base64") },
-  });
-  assert.equal(spa.status, 200);
+  assert.equal(ok.status, 200);
+  assert.equal((await ok.json()).auth, "env");
 });
 
-test("server: enabling auth without a password refuses to start", async () => {
-  process.env.YM_AUTH_ENABLED = "true";
-  process.env.YM_AUTH_USER = "karl";
-  delete process.env.YM_AUTH_PASS;
-  await assert.rejects(import(`../src/server.mjs?authbad`), /refusing to start open/);
-  delete process.env.YM_AUTH_ENABLED;
-  delete process.env.YM_AUTH_USER;
+test("server: first-run setup flow creates the shared credential", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "ymc-"));
+  writeFileSync(join(dir, "yardmaster.toml"), `schema_version = 1\n[targets]\n`);
+  const authFile = join(dir, "console-auth.json");
+  process.env.YM_CONFIG_PATH = join(dir, "yardmaster.toml");
+  process.env.YM_CONFIG_FALLBACK = join(dir, "fallback.toml");
+  process.env.YM_METRICS_DB = join(dir, "none.db");
+  process.env.YM_AUTH_FILE = authFile;
+  delete process.env.YM_AUTH_DISABLED;
+
+  const { createConsoleServer } = await import(`../src/server.mjs?setup`);
+  const srv = createConsoleServer();
+  await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+  const base = `http://127.0.0.1:${srv.address().port}`;
+  t.after(() => {
+    srv.close();
+    rmSync(dir, { recursive: true, force: true });
+    delete process.env.YM_AUTH_FILE;
+    process.env.YM_AUTH_DISABLED = "1";
+  });
+
+  // Unconfigured: any page -> the setup form, API -> 403 setup.
+  const page = await fetch(`${base}/`);
+  assert.equal(page.status, 200);
+  assert.match(await page.text(), /first-run setup/i);
+  assert.equal((await fetch(`${base}/api/status`)).status, 403);
+
+  // Bad inputs.
+  assert.equal(
+    (await fetch(`${base}/api/setup`, { method: "POST", body: JSON.stringify({ user: "a", password: "short" }) })).status,
+    400,
+  );
+
+  // Create it.
+  const setup = await fetch(`${base}/api/setup`, {
+    method: "POST",
+    body: JSON.stringify({ user: "admin", password: "correct horse" }),
+  });
+  assert.equal(setup.status, 200);
+  assert.ok(existsSync(authFile));
+  const rec = JSON.parse(readFileSync(authFile, "utf8"));
+  assert.equal(rec.user, "admin");
+  assert.ok(rec.salt && rec.hash);
+  assert.ok(!/correct horse/.test(readFileSync(authFile, "utf8")), "password is not stored in cleartext");
+
+  // Now it's configured: 401 without creds, 200 with, setup re-run is 409.
+  assert.equal((await fetch(`${base}/api/status`)).status, 401);
+  const ok = await fetch(`${base}/api/status`, {
+    headers: { authorization: "Basic " + Buffer.from("admin:correct horse").toString("base64") },
+  });
+  assert.equal(ok.status, 200);
+  assert.equal((await ok.json()).auth, "configured");
+  // Re-running setup once configured: unauthenticated -> 401, authenticated -> 409.
+  assert.equal(
+    (await fetch(`${base}/api/setup`, { method: "POST", body: JSON.stringify({ user: "x", password: "xxxxxxxx" }) }))
+      .status,
+    401,
+  );
+  assert.equal(
+    (
+      await fetch(`${base}/api/setup`, {
+        method: "POST",
+        headers: { authorization: "Basic " + Buffer.from("admin:correct horse").toString("base64") },
+        body: JSON.stringify({ user: "x", password: "xxxxxxxx" }),
+      })
+    ).status,
+    409,
+  );
 });
 
 test("server: PUT replaces a dangling symlink at the config path", async (t) => {

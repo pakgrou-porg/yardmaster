@@ -1,13 +1,19 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 Karl Miller
 # SPDX-License-Identifier: Apache-2.0
 #
-# Example yardmaster.toml for a containerized node. Bind-mount this at
-# /config/yardmaster.toml (set YM_CONFIG_FILE to its host path).
+# Example yardmaster.toml. Either:
+#   - paste + edit it in the Console (Config tab), which saves it to the data
+#     volume, or
+#   - bind-mount it read-only at /config/yardmaster.toml on the `yardmaster`
+#     service (uncomment the mount in the stack).
 #
-# Validate before deploying:
-#   docker run --rm -v "$PWD/yardmaster.toml:/config/yardmaster.toml:ro" \
-#     --entrypoint /opt/yardmaster/bin/yardmaster-dataplane \
-#     ghcr.io/pakgrou-porg/yardmaster:latest dry-run --config /config/yardmaster.toml
+# Local + LAN engines need no API key. OpenRouter is the only keyed provider;
+# its key comes from the OPENROUTER_API_KEY environment variable (passed into the
+# `yardmaster` service by the stack) and is NEVER written to this file.
+#
+# Routing stays local by default: `[routes.default]` sends everything to the
+# local engine. The OpenRouter models are reached only when a request names one
+# of their slugs (zero-config pass-through by model name).
 
 schema_version = 1
 
@@ -20,12 +26,12 @@ anthropic_port = 4000
 policy = "pair_default"
 
 [egress]
-allow_remote = false     # keep prompts on the LAN by default
+# allow_remote must be true for the OpenRouter targets below to load. It does
+# NOT change default routing — that is still `[routes.default]` -> local.
+allow_remote = true
 allow_lan = true
 
 [discovery]
-# In a bridge-network container, leave lan_scan off: the container's subnet is
-# not your LAN. With host networking you may enable it.
 lan_scan = false
 
 [metrics]
@@ -34,20 +40,88 @@ prometheus = true
 
 [targets]
 
-# --- the local engine (Ollama in the shared namespace) ---
+# ------------------------------------------------------------------ local Ollama
+# The engine itself (127.0.0.1:11434 in the shared namespace), not the :11435 proxy.
 [providers.local_ollama]
 kind = "openai_compatible"
-base_url = "http://127.0.0.1:11434"   # the engine itself, not the :11435 proxy
+base_url = "http://127.0.0.1:11434"
 
-# `id` must be a model you have actually pulled (`ollama list`). "llama3.2",
-# "qwen3:14b", "gemma3:12b", "deepseek-r1:14b" are real; the spec's "qwen4:*"
-# are placeholders.
-[targets.local]
-id = "llama3.2"
+[targets.local_llama32]
+id = "llama3.2:latest"
 locality = "lan"
 provider = "local_ollama"
 
+[targets.local_r1_32b]
+id = "deepseek-r1:32b"
+locality = "lan"
+provider = "local_ollama"
+
+# --------------------------------------------------------------- LAN vLLM nodes
+# Private-range hosts, plain http, no key. Adjust addresses / model ids to match
+# `curl http://<host>:<port>/v1/models` on each box.
+[providers.lan_vllm_utility]
+kind = "openai_compatible"
+base_url = "http://10.116.2.56:8002/v1"
+[targets.lan_gemma_utility]
+id = "gemma-4-12b-utility"
+locality = "lan"
+provider = "lan_vllm_utility"
+
+[providers.lan_vllm_big]
+kind = "openai_compatible"
+base_url = "http://10.116.2.120:8000/v1"
+[targets.lan_qwen_a3b]
+id = "qwen3.6-35b-a3b"
+locality = "lan"
+provider = "lan_vllm_big"
+
+# ------------------------------------------------------------------- OpenRouter
+# Cloud fallback. Keyed via env (OPENROUTER_API_KEY). Reached only when a request
+# explicitly names one of these model ids.
+[providers.openrouter]
+kind = "openrouter"
+api_key_env = "OPENROUTER_API_KEY"
+
+[targets.or_gpt56_terra]
+id = "openai/gpt-5.6-terra"
+locality = "remote"
+provider = "openrouter"
+
+[targets.or_gpt6_astra]
+id = "openai/gpt-6-astra"
+locality = "remote"
+provider = "openrouter"
+
+[targets.or_qwen38_max]
+id = "qwen/qwen3.8-max-0902"
+locality = "remote"
+provider = "openrouter"
+
+[targets.or_deepseek_v4_flash_vision]
+id = "deepseek/deepseek-v4-flash-vision-exp"
+locality = "remote"
+provider = "openrouter"
+
+[targets.or_qwen38_flash]
+id = "qwen/qwen3.8-flash"
+locality = "remote"
+provider = "openrouter"
+
+[targets.or_claude_sonnet5]
+id = "anthropic/claude-sonnet-5"
+locality = "remote"
+provider = "openrouter"
+
+# ----------------------------------------------------------------------- routes
 [routes.default]
 id = "auto"
 type = "passthrough"
-target = "local"
+target = "local_llama32"
+
+# Optional: local -> cloud escalation instead of pass-through. Swap the default
+# route's type to "escalation" and set the targets:
+# [routes.default]
+# id = "auto"
+# type = "escalation"
+# weak_target = "local_llama32"
+# strong_target = "or_claude_sonnet5"
