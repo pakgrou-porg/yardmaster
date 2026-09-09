@@ -8,15 +8,15 @@
 #
 #   ollama              the GPU engine (ROCm). Owns the network namespace; every
 #                       published port is declared here.
-#   yardmaster          the PAIR broker + Ollama proxy + the Yardmaster Console
-#                       + a LAN bridge for the proxy. Self-chowns its volume and
-#                       drops to uid 10001.
-#   yardmaster-harness  `dsh web` (DeepSeek Harness), auto-pointed at the
-#                       Yardmaster proxy, behind a Basic-Auth reverse proxy.
-#                       Kept separate because it runs model-generated code.
+#   yardmaster          the PAIR broker + proxy + the interim router (:4000,
+#                       config-driven autorouting) + the Yardmaster Console + a
+#                       LAN bridge. Self-chowns its volume and drops to uid 10001.
+#   yardmaster-harness  `dsh web` (DeepSeek Harness), auto-pointed at the router,
+#                       behind a Basic-Auth reverse proxy. Kept separate because
+#                       it runs model-generated code.
 #
 # Ports (published on `ollama`):
-#   11435  -> LAN bridge -> 127.0.0.1:11435 proxy   inference clients (plaintext)
+#   11435  -> LAN bridge -> 127.0.0.1:4000 router   inference clients (autorouting)
 #    8770  -> Yardmaster Console                     ${YM_BIND}
 #    3080  -> Harness auth proxy -> dsh              ${YM_BIND}
 #
