@@ -151,3 +151,54 @@ strong_target = "strong"
   assert.equal(r.status, 200);
   assert.equal(r.headers.get("x-served-by"), "engine-strong");
 });
+
+test("router: retries a 429 on the same hop and eventually succeeds", async (t) => {
+  const flaky = spawn(process.execPath, [STUB], {
+    env: { ...process.env, NODE_NAME: "engine-flaky", PORT: "19502", MODELS: "m", FAIL_TIMES: "2", FAIL_STATUS: "429" },
+    stdio: "ignore",
+  });
+  const dir = mkdtempSync(join(tmpdir(), "ymr-"));
+  const cfgPath = join(dir, "yardmaster.toml");
+  writeFileSync(
+    cfgPath,
+    `schema_version = 1
+[providers.f]
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:19502/v1"
+[targets]
+[targets.m]
+id = "m"
+locality = "lan"
+provider = "f"
+[routes.default]
+id = "d"
+type = "passthrough"
+target = "m"
+`,
+  );
+  const srv = spawn(process.execPath, [fileURLToPath(new URL("../src/server.mjs", import.meta.url))], {
+    env: {
+      ...process.env,
+      YM_ROUTER_PORT: "19503",
+      YM_ROUTER_CONFIG: cfgPath,
+      YM_METRICS_DB: join(dir, "m.db"),
+      YM_ROUTER_RETRY: "4",
+      YM_ROUTER_RETRY_BASE_MS: "50",
+    },
+    stdio: "ignore",
+  });
+  t.after(() => {
+    flaky.kill();
+    srv.kill();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  await wait(700);
+
+  const r = await fetch("http://127.0.0.1:19503/v1/chat/completions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ model: "m", messages: [{ role: "user", content: "hi" }], stream: false }),
+  });
+  assert.equal(r.status, 200, "router swallowed the two 429s and got the 200");
+  assert.equal(r.headers.get("x-yardmaster-retries"), "2", "two retries recorded");
+});

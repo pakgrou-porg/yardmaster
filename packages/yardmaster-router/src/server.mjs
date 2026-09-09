@@ -35,6 +35,11 @@ const cfg = {
   metricsDb:
     process.env.YM_METRICS_DB || "/data/Nvidia Corporation/Personal AI Router/yardmaster-metrics.db",
   upstreamTimeoutMs: Number(process.env.YM_ROUTER_TIMEOUT_MS || 300000),
+  // Transient upstream errors (429 rate-limit, 503, …) are retried on the same
+  // hop with backoff before failing over / surfacing. Agent loops hit provider
+  // rate limits hard; this smooths them so the client rarely sees a 429.
+  retryMax: Number(process.env.YM_ROUTER_RETRY || 4),
+  retryBaseMs: Number(process.env.YM_ROUTER_RETRY_BASE_MS || 600),
 };
 
 const metrics = openMetrics(cfg.metricsDb);
@@ -119,34 +124,82 @@ function baseMetricRow(req, ingressProtocol) {
   };
 }
 
-/** Try each hop in the chain; return { upstream, hop, hopIndex } for the first that connects OK. */
+const RETRYABLE = new Set([429, 502, 503, 529]);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** How long to wait before a retry: honour Retry-After, else exponential backoff. */
+function backoffMs(resp, attempt) {
+  const ra = resp?.headers?.get("retry-after");
+  if (ra) {
+    const secs = /^\d+$/.test(ra.trim()) ? Number(ra) : (Date.parse(ra) - Date.now()) / 1000;
+    if (secs > 0) return Math.min(secs * 1000, 30000);
+  }
+  return Math.min(cfg.retryBaseMs * 2 ** attempt + Math.random() * 250, 20000);
+}
+
+/**
+ * Try each hop in the chain; retry a hop on a transient status (429/503/…) with
+ * backoff before moving on. Returns { upstream, hop, hopIndex, retries } for the
+ * first hop that returns a usable response (2xx, or a non-retryable error on the
+ * last hop, which is forwarded to the client).
+ */
 async function dispatch(chain, payload, extraHeaders) {
   let lastErr = "no hop";
+  let retries = 0;
   for (let i = 0; i < chain.length; i++) {
     const hop = chain[i];
     const url = hop.chatUrl || `${hop.baseUrl}/v1/chat/completions`;
     const headers = { "content-type": "application/json", ...(hop.extraHeaders || {}), ...(extraHeaders || {}) };
     if (hop.apiKey) headers.authorization = `Bearer ${hop.apiKey}`;
     const body = JSON.stringify({ ...payload, model: hop.model, ...(hop.extraBody || {}) });
-    const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), cfg.upstreamTimeoutMs);
-    try {
-      const upstream = await fetch(url, { method: "POST", headers, body, signal: ac.signal });
-      clearTimeout(timer);
-      if (upstream.ok || i === chain.length - 1) return { upstream, hop, hopIndex: i };
-      lastErr = `hop ${i} (${hop.targetName}) -> ${upstream.status}`;
+    const last = i === chain.length - 1;
+
+    for (let attempt = 0; ; attempt++) {
+      const ac = new AbortController();
+      const timer = setTimeout(() => ac.abort(), cfg.upstreamTimeoutMs);
       try {
-        await upstream.body?.cancel();
-      } catch {
-        /* ignore */
+        const upstream = await fetch(url, { method: "POST", headers, body, signal: ac.signal });
+        clearTimeout(timer);
+        if (upstream.ok) return { upstream, hop, hopIndex: i, retries };
+        if (RETRYABLE.has(upstream.status) && attempt < cfg.retryMax) {
+          const wait = backoffMs(upstream, attempt);
+          console.warn(
+            `yardmaster-router: ${hop.model} via ${hop.provider} -> ${upstream.status}; retry ${attempt + 1}/${cfg.retryMax} in ${Math.round(wait)}ms`,
+          );
+          try {
+            await upstream.body?.cancel();
+          } catch {
+            /* ignore */
+          }
+          retries++;
+          await sleep(wait);
+          continue;
+        }
+        if (last) return { upstream, hop, hopIndex: i, retries };
+        lastErr = `hop ${i} (${hop.targetName}) -> ${upstream.status}`;
+        try {
+          await upstream.body?.cancel();
+        } catch {
+          /* ignore */
+        }
+        break; // try the next hop
+      } catch (e) {
+        clearTimeout(timer);
+        const why = e.name === "AbortError" ? "timeout" : e.message;
+        // A network error / timeout is not a rate limit — fail over to the next
+        // hop straight away; only a lone last hop gets one quick retry.
+        if (last && attempt < 1 && why !== "timeout") {
+          retries++;
+          await sleep(cfg.retryBaseMs);
+          continue;
+        }
+        lastErr = `hop ${i} (${hop.targetName}) -> ${why}`;
+        if (last) return { error: lastErr, retries };
+        break;
       }
-    } catch (e) {
-      clearTimeout(timer);
-      lastErr = `hop ${i} (${hop.targetName}) -> ${e.name === "AbortError" ? "timeout" : e.message}`;
-      if (i === chain.length - 1) return { error: lastErr };
     }
   }
-  return { error: lastErr };
+  return { error: lastErr, retries };
 }
 
 async function handleChat(req, res, { ingress }) {
@@ -196,20 +249,21 @@ async function handleChat(req, res, { ingress }) {
     row.node_or_provider = decided.chain[0]?.provider || "unknown";
     row.engine_kind = decided.chain[0]?.engineKind || "openai_compatible";
     row.locality = decided.chain[0]?.locality || "lan";
-    row.failover_count = Math.max(0, decided.chain.length - 1);
+    row.failover_count = Math.max(0, decided.chain.length - 1) + (result.retries || 0);
     row.http_status = 502;
     row.error_class = "upstream_unreachable";
     row.total_latency_ms = Date.now() - started;
     row.routing_overhead_ms = routingOverhead;
     metrics.record(row);
+    console.warn(`yardmaster-router: ${row.model} -> all upstreams failed after ${result.retries || 0} retries — ${result.error}`);
     return json(res, 502, { error: { message: `yardmaster-router: all upstreams failed — ${result.error}` } });
   }
 
-  const { upstream, hop, hopIndex } = result;
+  const { upstream, hop, hopIndex, retries = 0 } = result;
   row.node_or_provider = hop.provider;
   row.engine_kind = hop.engineKind;
   row.locality = hop.locality;
-  row.failover_count = hopIndex;
+  row.failover_count = hopIndex + retries;
   row.tier_decided = hopIndex > 0 ? "planner" : row.tier_decided;
   row.http_status = upstream.status;
   row.routing_overhead_ms = routingOverhead;
@@ -223,6 +277,7 @@ async function handleChat(req, res, { ingress }) {
     "x-yardmaster-provider": hop.provider,
     "x-yardmaster-locality": hop.locality,
     "x-yardmaster-failover": String(hopIndex),
+    "x-yardmaster-retries": String(retries),
   };
   const servedBy = upstream.headers.get("x-served-by");
   if (servedBy) outHeaders["x-served-by"] = servedBy;
@@ -253,6 +308,15 @@ async function handleChat(req, res, { ingress }) {
     row.error_class = "stream_interrupted";
   }
   res.end();
+
+  // Surface upstream errors — otherwise a forwarded 4xx/5xx is a black box.
+  if (!upstream.ok) {
+    console.warn(
+      `yardmaster-router: ${row.model} via ${hop.provider} -> HTTP ${upstream.status}` +
+        (retries ? ` (after ${retries} retries)` : "") +
+        `: ${buf.replace(/\s+/g, " ").slice(0, 400)}`,
+    );
+  }
 
   // usage: non-stream body has {usage}, a stream may carry a usage chunk.
   const usage = sniffUsage(buf);
