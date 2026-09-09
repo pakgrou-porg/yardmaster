@@ -102,6 +102,25 @@ their intent is an *input* to the pipeline.
 8. **apply** — atomic: write `cordis.patch.yml.next`, gate on
    `dsh --profile web --dump-config` exiting 0, then `rename()` into place;
    keep the prior region content as `.lkg` (last-known-good) with its hash.
+
+   **Auto-apply is additive-only.** On a reconcile the pipeline applies, without
+   approval:
+   - adding a newly-`validated` model to the rendered list;
+   - refreshing metadata (`context_window`, `capabilities`, `pricing`) on an
+     entry that stays present;
+   - any change whose cause is an operator edit to `[harness.overrides]` /
+     `[harness.policy]` / `[targets.*]` — the edit *is* the approval, including
+     `enabled = false` and a new `default`.
+
+   It does **not** auto-apply, and instead records the op in the pending plan
+   for `POST /v1/capabilities/apply` (or the Console P2 button):
+   - **removing** a model from the rendered list (including because it went
+     `unreachable` or was denied by a *policy rule* rather than an override);
+   - changing the `default` for any reason other than an operator edit.
+
+   An `unreachable` model that is still in the rendered list stays there (pi-ai
+   only needs it *listed*, not reachable, to boot) and is flagged in
+   `/v1/capabilities` until a human approves its removal.
 9. **rollback** — if the Harness health probe fails within `apply_probe_window`
    after an apply, restore `.lkg`, quarantine the capability whose op most
    recently changed (mark `policy = disabled`, `policy_reason = "rollback:
@@ -163,10 +182,11 @@ profile scaffold exists and tolerates an absent region on first boot.
 
 ## Phasing
 
-- **P1** — registry schema + pipeline (stages 1–9), `GET /v1/capabilities`,
-  marker-region atomic apply + `.lkg` rollback, `[harness.overrides]` +
-  `[harness.policy]` + validator support, entrypoint stops generating.
-  Reconcile on hot-reload + interval.
+- **P1** — registry schema + pipeline (stages 1–9), `GET /v1/capabilities` +
+  `POST /v1/capabilities/{reconcile,apply}`, marker-region **additive-only
+  auto-apply** + pending-plan for destructive ops + `.lkg` rollback,
+  `[harness.overrides]` + `[harness.policy]` + validator support, entrypoint
+  stops generating. Reconcile on hot-reload + interval.
 - **P2** — Console "Capabilities" tab: table (id / provider / locality /
   reachability / policy / rank / default), toggles that write back to
   `[harness.overrides]`, "view plan" / "apply now".
