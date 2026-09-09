@@ -14,8 +14,8 @@ Fedora 43/44, Docker + Portainer.
 | Service | What it runs | Reach it at |
 | --- | --- | --- |
 | `ollama` (`ollama/ollama:rocm`) | the engine, GPU-accelerated on the 8060S; **owns the network namespace** | `127.0.0.1:11434` in-namespace |
-| `yardmaster` | PAIR broker + Ollama proxy (`:11435`) + **the Yardmaster Console** (`:8770`) + a LAN bridge (`:11430 → :11435`) | Console on **`:8770`** (`${YM_BIND}`) |
-| `yardmaster-harness` | **`dsh web`** (`:3080`, loopback) auto-pointed at the Yardmaster proxy, behind a Basic-Auth reverse proxy (`:3081`) | Harness on **`:3080`** (`${YM_BIND}`) |
+| `yardmaster` | PAIR broker + Ollama proxy (`:11435`) + **the interim router** (`:4000`, autorouting) + **the Console** (`:8770`) + a LAN bridge (`:11430 → :4000`) | Console on **`:8770`** (`${YM_BIND}`) |
+| `yardmaster-harness` | **`dsh web`** (`:3080`, loopback) auto-pointed at the router, behind a Basic-Auth reverse proxy (`:3081`) | Harness on **`:3080`** (`${YM_BIND}`) |
 
 The two Yardmaster containers `network_mode: service:ollama`, so all published
 ports are declared on `ollama`. Each self-chowns its named volume and drops to
@@ -25,14 +25,15 @@ Published ports (on `ollama`):
 
 | Host port | → | Purpose |
 | --- | --- | --- |
-| `11435` | LAN bridge → `127.0.0.1:11435` proxy | inference clients (plaintext OpenAI/Ollama API) |
+| `11435` | LAN bridge → `127.0.0.1:4000` router | inference clients (OpenAI/Ollama API, **autorouting**) |
 | `8770` | Console | `${YM_BIND}` |
 | `3080` | Harness auth proxy → `dsh` | `${YM_BIND}` |
 
-> **The proxy is loopback-only for plaintext — by design.** PAIR 403s a
-> non-loopback plaintext request (`cluster peers must use mTLS`). The in-namespace
-> LAN bridge (part of the `yardmaster` container) makes a fresh `127.0.0.1`
-> connection so LAN clients on host `:11435` are served.
+The router binds `127.0.0.1:4000` (not published). Inference clients reach it on
+host `:11435` via the LAN bridge. Set `YM_ROUTER_BIND=0.0.0.0` to also serve it
+directly — cloud egress then becomes reachable from the LAN, gated by `[egress]
+allow_remote` + an explicit OpenRouter model id. The PAIR proxy still runs on
+`:11435` in-namespace for cluster peers (mTLS).
 
 > **`dsh` binds `127.0.0.1` only** (it runs model-generated code and refuses
 > `0.0.0.0`). The Basic-Auth reverse proxy (part of `yardmaster-harness`)
@@ -69,15 +70,24 @@ Do the first-run setup from the host with `YM_BIND=127.0.0.1`, then set
 
 ### What works today
 
-Verified on this host (Fedora 43, Docker 29.8): ROCm inference through the proxy;
-the Console (config edit + Validate + backend probes + first-run auth); the
-Harness auto-configured to route through Yardmaster (`dsh` default model served
-by the `yardmaster` pi-ai route). **Not yet:** Switchyard model-selection, the
-`:4000` Anthropic ingress, config-driven routing across the vLLM nodes — all need
-`YM_DATAPLANE_MODE=dataplane`
-([#36](https://github.com/pakgrou-porg/yardmaster/issues/36) →
-[#26](https://github.com/pakgrou-porg/yardmaster/issues/26)). See
-[ADR-0026](decisions/0026-three-container-stack-and-first-run-auth.md).
+Verified on this host (Fedora 43, Docker 29.8): ROCm inference; the Console
+(config edit + Validate + backend probes + first-run auth); the Harness
+auto-configured to route through Yardmaster.
+
+**Autorouting** is live via the interim **`YM_DATAPLANE_MODE=router`** (the
+default in this stack): a Node data plane that routes a request to a
+`[targets.*]` by matching model `id`, else the `[routes.default]` route
+(`passthrough` / `escalation`), across local Ollama, LAN vLLM, and OpenRouter —
+with `[egress]` enforcement, streaming, and per-request rows in the Console
+**Metrics** tab. See
+[ADR-0027](decisions/0027-interim-node-router.md).
+
+**Not the router (still [#36](https://github.com/pakgrou-porg/yardmaster/issues/36)
+→ [#26](https://github.com/pakgrou-porg/yardmaster/issues/26)):** Switchyard
+learned model-selection / `plan_execute`, PAIR GPU-pressure placement, tiers, the
+`stage_router` / `llm_classifier` route types, the `:4000` Anthropic wire
+protocol, cost estimation. When the Rust `yardmaster-dataplane` lands it is a
+drop-in swap (`yardmaster.toml` + the metrics schema are unchanged).
 
 ---
 
@@ -204,14 +214,19 @@ curl -s -u admin:<pw> http://127.0.0.1:8770/api/status | grep '"auth"'          
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3080/                    # 401
 curl -s -o /dev/null -w '%{http_code}\n' -u admin:<pw> http://127.0.0.1:3080/      # 303 (dsh)
 
-# 5. inference through the proxy (LAN entry point), model = one you have pulled
-curl -s http://127.0.0.1:11435/v1/chat/completions \
+# 5. the router loaded your config
+curl -s http://127.0.0.1:11435/healthz            # {"mode":"router","config_ok":true,"targets":N}
+curl -s http://127.0.0.1:11435/v1/models          # every model id in yardmaster.toml
+
+# 6. autorouting — the response headers show where it went
+curl -s -D- -o /dev/null http://127.0.0.1:11435/v1/chat/completions \
   -H 'content-type: application/json' \
   -d '{"model":"llama3.2:latest","messages":[{"role":"user","content":"say hi"}]}'
+#   x-yardmaster-target: <target>   x-yardmaster-provider: <provider>   x-yardmaster-locality: lan
 
-# 6. the Harness auto-config points dsh at Yardmaster
+# 7. the Harness auto-config points dsh at the router
 docker exec yardmaster-harness sh -c 'grep -E "baseURL:|model:" /dshhome/profiles/web/cordis.patch.yml'
-#   baseURL: http://127.0.0.1:11435/v1
+#   baseURL: http://127.0.0.1:4000/v1
 #   model: deepseek-r1:32b
 ```
 
@@ -235,28 +250,40 @@ proxy in front.
 
 ---
 
-## 6. Point clients at the proxy
+## 6. Point clients at the router
 
-From any LAN machine (`model` = whatever you pulled / a route target):
+Host `:11435` is the LAN entry point (LAN bridge → the router). It **autoroutes
+by model id**:
 
 ```bash
-# Ollama-style
-curl http://<framework-ip>:11435/api/chat -d '{
-  "model": "llama3.2:latest",
-  "messages": [{"role": "user", "content": "hello"}], "stream": false }'
-
-# OpenAI-style
+# a local model -> the local Ollama
 curl http://<framework-ip>:11435/v1/chat/completions \
   -H 'content-type: application/json' -d '{
   "model": "llama3.2:latest",
   "messages": [{"role": "user", "content": "hello"}] }'
 
-# an OpenRouter model (leaves the LAN; needs OPENROUTER_API_KEY + allow_remote)
+# a LAN vLLM model id -> that node (add the target to yardmaster.toml first)
+curl http://<framework-ip>:11435/v1/chat/completions \
+  -H 'content-type: application/json' -d '{
+  "model": "gemma-4-12b-utility",
+  "messages": [{"role": "user", "content": "hello"}] }'
+
+# an OpenRouter model -> the cloud (needs OPENROUTER_API_KEY + [egress] allow_remote)
 curl http://<framework-ip>:11435/v1/chat/completions \
   -H 'content-type: application/json' -d '{
   "model": "anthropic/claude-sonnet-5",
   "messages": [{"role": "user", "content": "hello"}] }'
+
+# Ollama-style also works
+curl http://<framework-ip>:11435/api/chat -d '{
+  "model": "llama3.2:latest",
+  "messages": [{"role": "user", "content": "hello"}], "stream": false }'
 ```
+
+A model id that matches no `[targets.*]` follows `[routes.default]`. Add
+`-D-` to any request to see the `x-yardmaster-target` / `-provider` /
+`-locality` decision headers. Per-request rows land in the Console **Metrics**
+tab.
 
 Pull local models with `docker exec yardmaster-ollama ollama pull <name>` (use
 real names from <https://ollama.com/library>). At minimum pull the Harness
@@ -339,8 +366,11 @@ Set on the `ollama` service (defaults in the stack are sane):
 | Harness browser: `Blocked request. This host is not allowed` | `dsh`'s trust fence — set `YM_LAN_HOST` to the exact IP you type in the URL bar and redeploy (or add `YM_HARNESS_TRUSTED_HOSTS="a:3080 b:3080"`). |
 | `yardmaster-harness` crash-loops: `provider "yardmaster" resolves no models` | old image, or `YM_HARNESS_MODEL` empty — the entrypoint must list the model. Rebuild; set `YM_HARNESS_MODEL`. |
 | `yardmaster-harness` crash-loops: `cordis.patch.yml must be a top-level YAML array` | a malformed hand-written overlay. Reset it: `docker run --rm -v yardmaster-harness:/dshhome alpine sh -c 'printf "[]\n" > /dshhome/profiles/web/cordis.patch.yml'` then `docker restart yardmaster-harness`. |
-| proxy `:11435`: `no available node advertises the requested model` | the engine isn't on `127.0.0.1:11434`, or `YM_LOCAL_ENGINE_URL` is unset. `docker logs yardmaster \| grep "manual node"`. Bump `YM_MANUAL_NODE_DELAY` if Ollama is slow to start. |
-| LAN clients get `403` "rejected non-loopback plaintext" on `:11435` | you published the raw proxy port instead of the bridge — the stack maps `11435:11430`; don't change it. |
+| router: `model "X" matches no target and there is no [routes.default]` | add a `[targets.*]` with `id = "X"`, or a `[routes.default]` — then Save in the Console (the router hot-reloads). |
+| router: `provider "openrouter": OPENROUTER_API_KEY is not set` | set `OPENROUTER_API_KEY` in the stack env and redeploy. |
+| router: `all upstreams failed` for a LAN vLLM model | check the `base_url` in `yardmaster.toml` and that `curl <base_url>/models` works from the `yardmaster` container. |
+| `curl :11435/healthz` shows `mode: proxy` (not `router`) | `YM_DATAPLANE_MODE` isn't `router` — set it in the stack env and redeploy. |
+| Metrics tab still empty | the router writes a row per request — send one; confirm `YM_METRICS_DB` points into `/data` and the volume is writable. |
 | Console **Agent** iframe shows a loopback URL from a LAN browser | old image — rebuild; the current `/api/agent` rewrites the host from your request. |
 | `nvidia-smi unavailable` / `detected 0 GPU(s)` in logs | expected on AMD — PAIR's GPU telemetry is NVIDIA-only. Does not affect the engine's GPU use. [#48](https://github.com/pakgrou-porg/yardmaster/issues/48). |
 | a container exits and the whole unit restarts | by design — `yardmaster` supervises broker + console + bridge; `yardmaster-harness` supervises `dsh` + the auth proxy. Check `docker logs <name>` for which child died. |

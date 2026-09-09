@@ -62,11 +62,15 @@ services:
       ollama: { condition: service_healthy }
     environment:
       NVPAIR_LOG_LEVEL: info
-      YM_DATAPLANE_MODE: proxy
+      # router = PAIR proxy + the interim Node data plane (config-driven
+      # autorouting by model id; passthrough + escalation; metrics).
+      YM_DATAPLANE_MODE: router
+      YM_ROUTER_PORT: "4000"
+      YM_ROUTER_BIND: 127.0.0.1        # 0.0.0.0 exposes autorouting (incl. cloud egress) on :11435
       YM_LOCAL_ENGINE_URL: http://127.0.0.1:11434
       YM_PROXY_PORT: "11435"
       YM_LAN_BRIDGE_PORT: "11430"
-      YM_HEALTHCHECK_URL: http://127.0.0.1:11435/api/tags
+      YM_HEALTHCHECK_URL: http://127.0.0.1:4000/healthz
       YM_CONSOLE_PORT: "8770"
       YM_CONSOLE_BIND: 0.0.0.0
       YM_AGENT_PORT: "3080"
@@ -98,13 +102,13 @@ services:
     entrypoint: ["/usr/bin/tini", "--", "/usr/local/bin/yardmaster-harness-entrypoint"]
     depends_on:
       ollama: { condition: service_healthy }
-      yardmaster: { condition: service_started }
+      yardmaster: { condition: service_healthy }
     environment:
       DSH_HOME: /dshhome
       YM_HARNESS_PORT: "3080"
       YM_HARNESS_PROXY_PORT: "3081"
       YM_HARNESS_TRUSTED_HOSTS: "127.0.0.1:3080 ${YM_LAN_HOST:-}:3080"
-      YM_HARNESS_UPSTREAM: http://127.0.0.1:11435/v1
+      YM_HARNESS_UPSTREAM: http://127.0.0.1:4000/v1
       YM_HARNESS_MODEL: "${YM_HARNESS_MODEL:-deepseek-r1:32b}"
       YM_AUTH_USER: "${YM_AUTH_USER:-}"
       YM_AUTH_PASS: "${YM_AUTH_PASS:-}"

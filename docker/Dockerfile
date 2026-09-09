@@ -63,6 +63,15 @@ COPY packages/yardmaster-console/public ./public
 COPY crates/yardmaster-metrics/migrations ./crates/yardmaster-metrics/migrations
 
 # ---------------------------------------------------------------------------
+# Stage — router-build: the interim Node data plane (YM_DATAPLANE_MODE=router)
+# ---------------------------------------------------------------------------
+FROM node:24-bookworm-slim AS router-build
+WORKDIR /router
+COPY packages/yardmaster-router/package.json ./
+RUN npm install --omit=dev --no-audit --no-fund
+COPY packages/yardmaster-router/src ./src
+
+# ---------------------------------------------------------------------------
 # Stage — runtime-base: everything except the backend binaries
 # ---------------------------------------------------------------------------
 FROM debian:bookworm-slim AS runtime-base
@@ -89,6 +98,8 @@ COPY --from=dsh /usr/local/bin/node /usr/local/bin/node
 RUN ln -s /opt/yardmaster/node_modules/@deepseek-ai/dsh/lib/bin.js /usr/local/bin/dsh
 # The Yardmaster Console (config editor + backend probes + metrics + Agent link).
 COPY --from=console-build /console /opt/yardmaster/console
+# The interim Node data plane — config-driven routing (repo issue #36 replaces it).
+COPY --from=router-build /router /opt/yardmaster/router
 
 COPY docker/entrypoint.sh /usr/local/bin/yardmaster-entrypoint
 COPY docker/harness-entrypoint.sh /usr/local/bin/yardmaster-harness-entrypoint

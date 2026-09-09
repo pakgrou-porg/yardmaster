@@ -37,9 +37,23 @@ fi
 : "${YM_HARNESS_TRUSTED_HOSTS:=127.0.0.1:${YM_HARNESS_PORT}}"
 : "${YM_HARNESS_UPSTREAM:=http://127.0.0.1:11435/v1}"
 : "${YM_HARNESS_MODEL:=deepseek-r1:32b}"
-# pi-ai needs a hand-declared gateway's models listed. Default = just the
-# default model; add more with YM_HARNESS_MODELS="a,b,c".
-: "${YM_HARNESS_MODELS:=${YM_HARNESS_MODEL}}"
+# pi-ai needs a hand-declared gateway's models listed. If YM_HARNESS_MODELS is
+# unset, discover them from the upstream's /v1/models (the router advertises
+# every model in yardmaster.toml); fall back to just the default model. Add /
+# override explicitly with YM_HARNESS_MODELS="a,b,c".
+if [ -z "${YM_HARNESS_MODELS:-}" ]; then
+  _disc="$(node -e '
+    const u=(process.argv[1].replace(/\/+$/,""))+"/models";
+    const ac=new AbortController(); const t=setTimeout(()=>ac.abort(),4000);
+    fetch(u,{signal:ac.signal}).then(r=>r.json()).then(j=>{
+      clearTimeout(t);
+      const ids=(j.data||[]).map(m=>m.id).filter(Boolean);
+      if(ids.length) process.stdout.write(ids.join(","));
+    }).catch(()=>{});
+  ' "${YM_HARNESS_UPSTREAM}" 2>/dev/null || true)"
+  YM_HARNESS_MODELS="${_disc:-${YM_HARNESS_MODEL}}"
+  [ -n "${_disc}" ] && echo "yardmaster-harness: discovered models from ${YM_HARNESS_UPSTREAM}: ${YM_HARNESS_MODELS}"
+fi
 case ",${YM_HARNESS_MODELS}," in
   *",${YM_HARNESS_MODEL},"*) ;;
   *) YM_HARNESS_MODELS="${YM_HARNESS_MODEL},${YM_HARNESS_MODELS}" ;;

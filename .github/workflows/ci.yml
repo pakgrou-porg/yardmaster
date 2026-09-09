@@ -112,6 +112,11 @@ jobs:
           npm --prefix packages/yardmaster-console ci --no-audit --no-fund
           npm --prefix packages/yardmaster-console run typecheck
           npm --prefix packages/yardmaster-console test
+      - name: yardmaster-router (node:test)
+        run: |
+          npm --prefix packages/yardmaster-router ci --no-audit --no-fund
+          npm --prefix packages/yardmaster-router run typecheck
+          npm --prefix packages/yardmaster-router test
 
   harness-profiles:
     # The yardmaster-web / yardmaster-headless profiles reference the plugin and

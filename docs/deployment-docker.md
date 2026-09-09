@@ -20,6 +20,7 @@ Worked, machine-specific walkthrough:
 | --- | --- |
 | `ollama` (or any engine) container | works today |
 | `yardmaster` `--target runtime-proxy` (Go workers) | builds today; PAIR-style Ollama proxy on `:11435` |
+| `YM_DATAPLANE_MODE=router` (interim Node router: model-id routing, passthrough/escalation, OpenRouter, metrics) | works today — [ADR-0027](decisions/0027-interim-node-router.md) |
 | `yardmaster` `--target runtime` (adds Rust data plane) | blocked on [#36](https://github.com/pakgrou-porg/yardmaster/issues/36) |
 | `YM_DATAPLANE_MODE=dataplane` (Switchyard routing, `[routes]`/`[providers]`, `:4000` Anthropic) | blocked on [#26](https://github.com/pakgrou-porg/yardmaster/issues/26) |
 | `yardmaster-console` (Config / Backends / Metrics / Agent) | works today, **bundled into the `yardmaster` container** (ADR-0026); Metrics fills in with the data plane |
@@ -36,7 +37,7 @@ engines — run engines as their own service/host and Yardmaster fronts them.
 | Container | Runs |
 | --- | --- |
 | `ollama` (or any engine) | the engine. **Owns the network namespace**; every published port is declared here. |
-| `yardmaster` | `nvpair-ui-broker` + Go workers (Ollama proxy on `:11435`) + **the bundled Console** (`:8770`) + a LAN bridge (`:11430 → :11435`). |
+| `yardmaster` | `nvpair-ui-broker` + Go workers (proxy `:11435`) + **the interim router** (`:4000`) + **the Console** (`:8770`) + a LAN bridge (`:11430 → :4000`). |
 | `yardmaster-harness` | `dsh web` (`:3080`, loopback) + its Basic-Auth reverse proxy (`:3081`). Separate because it runs model-generated code. |
 
 The `yardmaster` entrypoint registers the local engine as a **manual node** at
@@ -55,7 +56,8 @@ wiring.
 | --- | --- | --- |
 | `11434` | the engine (Ollama), loopback in the namespace | optional (`"11434:11434"`) for engine-direct |
 | `11435` | the Yardmaster **proxy** | **no** — loopback-only for plaintext (403 otherwise) |
-| `11430` | the LAN bridge (in `yardmaster`) → `127.0.0.1:11435` | **yes** — `"11435:11430"`; the LAN entry point for inference |
+| `11430` | the LAN bridge (in `yardmaster`) → the router `:4000` (or the proxy `:11435` in `proxy` mode) | **yes** — `"11435:11430"`; the LAN entry point for inference |
+| `4000` | the interim **router** (`YM_DATAPLANE_MODE=router`); `YM_ROUTER_BIND` gates it | loopback by default |
 | `8770` | the bundled **Console** | `"${YM_BIND:-127.0.0.1}:8770:8770"` |
 | `3081` | the Harness **auth proxy** (in `yardmaster-harness`) → `127.0.0.1:3080` | `"${YM_BIND:-127.0.0.1}:3080:3081"` — dsh won't bind `0.0.0.0` |
 | `3080` | `dsh web`, loopback | via the auth proxy above |

@@ -86,10 +86,18 @@ args=(
   --log-level "${NVPAIR_LOG_LEVEL:-info}"
 )
 
+# `router` also runs the interim Node data plane (see below); it still needs the
+# PAIR proxy workers for cluster/telemetry, so it shares the `proxy` wiring.
+YM_ROUTER=0
 case "${YM_DATAPLANE_MODE:-proxy}" in
   proxy)
     # Current tree: PAIR's two proxy workers. Works today.
     args+=( --proxy-path "${BIN}/ollama-proxy" --lmstudio-proxy-path "${BIN}/lmstudio-proxy" )
+    ;;
+  router)
+    # PAIR proxy workers + the interim Node router (config-driven autorouting).
+    args+=( --proxy-path "${BIN}/ollama-proxy" --lmstudio-proxy-path "${BIN}/lmstudio-proxy" )
+    YM_ROUTER=1
     ;;
   dataplane)
     # Post-#26: one Rust worker + the LAN scanner. Flags below are the proposed
@@ -136,26 +144,49 @@ node /opt/yardmaster/console/src/server.mjs &
 CONSOLE=$!
 echo "yardmaster-entrypoint: console on ${YM_CONSOLE_BIND}:${YM_CONSOLE_PORT}"
 
-# --- LAN bridge for the loopback-only inference proxy -----------------
-# PAIR's proxy 403s non-loopback plaintext; this in-namespace forwarder makes a
-# fresh 127.0.0.1 connection so LAN clients (published :11435) are served. No
-# auth: inference clients are not browsers and model access is gated elsewhere.
-BRIDGE=""
-if [ "${YM_DATAPLANE_MODE:-proxy}" = "proxy" ]; then
-  AP_OPEN=1 AP_LISTEN_PORT="${YM_LAN_BRIDGE_PORT:-11430}" \
-  AP_TARGET_HOST=127.0.0.1 AP_TARGET_PORT="${YM_PROXY_PORT:-11435}" \
-    node /opt/yardmaster/lib/yardmaster-auth-proxy.mjs &
-  BRIDGE=$!
-  echo "yardmaster-entrypoint: LAN bridge :${YM_LAN_BRIDGE_PORT:-11430} -> 127.0.0.1:${YM_PROXY_PORT:-11435}"
+# --- interim Node router (YM_DATAPLANE_MODE=router) --------------------
+# Config-driven autorouting across local / LAN / OpenRouter by model id, with
+# passthrough + escalation routes and metrics. Loopback-only by default; set
+# YM_ROUTER_BIND=0.0.0.0 (and know that cloud egress becomes reachable, gated by
+# [egress] allow_remote + explicit model names). Placeholder for the Rust data
+# plane, repo issue #36.
+ROUTER=""
+if [ "${YM_ROUTER}" = "1" ]; then
+  ROUTER_CFG="${APP_DIR}/yardmaster.toml"
+  [ -f /config/yardmaster.toml ] && ROUTER_CFG=/config/yardmaster.toml
+  YM_ROUTER_PORT="${YM_ROUTER_PORT:-4000}" \
+  YM_ROUTER_BIND="${YM_ROUTER_BIND:-127.0.0.1}" \
+  YM_ROUTER_CONFIG="${ROUTER_CFG}" \
+  YM_CONFIG_FALLBACK="${YM_CONFIG_FALLBACK:-${APP_DIR}/yardmaster.toml}" \
+  YM_METRICS_DB="${YM_METRICS_DB:-${APP_DIR}/yardmaster-metrics.db}" \
+    node /opt/yardmaster/router/src/server.mjs &
+  ROUTER=$!
+  echo "yardmaster-entrypoint: router on ${YM_ROUTER_BIND:-127.0.0.1}:${YM_ROUTER_PORT:-4000}"
 fi
 
-trap 'kill -TERM "$BROKER" "$CONSOLE" ${BRIDGE:-} 2>/dev/null || true' TERM INT
+# --- LAN bridge -----------------------------------------------------
+# In `proxy` mode: bridge LAN clients to PAIR's loopback-only proxy (403 on
+# non-loopback plaintext). In `router` mode: bridge them to the router, so a
+# client on published :11435 gets autorouting. No auth on either — inference
+# clients are not browsers; cloud egress is gated by [egress] + model name.
+BRIDGE=""
+BRIDGE_TARGET="${YM_PROXY_PORT:-11435}"
+[ "${YM_ROUTER}" = "1" ] && BRIDGE_TARGET="${YM_ROUTER_PORT:-4000}"
+if [ "${YM_DATAPLANE_MODE:-proxy}" != "dataplane" ]; then
+  AP_OPEN=1 AP_LISTEN_PORT="${YM_LAN_BRIDGE_PORT:-11430}" \
+  AP_TARGET_HOST=127.0.0.1 AP_TARGET_PORT="${BRIDGE_TARGET}" \
+    node /opt/yardmaster/lib/yardmaster-auth-proxy.mjs &
+  BRIDGE=$!
+  echo "yardmaster-entrypoint: LAN bridge :${YM_LAN_BRIDGE_PORT:-11430} -> 127.0.0.1:${BRIDGE_TARGET}"
+fi
+
+trap 'kill -TERM "$BROKER" "$CONSOLE" ${BRIDGE:-} ${ROUTER:-} 2>/dev/null || true' TERM INT
 
 # If any supervised process exits, take the container down so Docker restarts
 # the whole unit (state is on the volume, so a restart is cheap).
-wait -n "$BROKER" "$CONSOLE" ${BRIDGE:-}
+wait -n "$BROKER" "$CONSOLE" ${BRIDGE:-} ${ROUTER:-}
 code=$?
 echo "yardmaster-entrypoint: a supervised process exited (${code}) — stopping" >&2
-kill -TERM "$BROKER" "$CONSOLE" ${BRIDGE:-} 2>/dev/null || true
+kill -TERM "$BROKER" "$CONSOLE" ${BRIDGE:-} ${ROUTER:-} 2>/dev/null || true
 wait 2>/dev/null || true
 exit "${code}"
