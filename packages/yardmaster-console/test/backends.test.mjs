@@ -55,6 +55,23 @@ base_url = "http://127.0.0.1:18092/v1"
   assert.ok(dead[0].error);
 });
 
+test("keyed providers (openrouter) surface without a base_url; missing key is flagged", async () => {
+  delete process.env.OPENROUTER_API_KEY;
+  const raw = `
+schema_version = 1
+[targets]
+[providers.openrouter]
+kind = "openrouter"
+api_key_env = "OPENROUTER_API_KEY"
+`;
+  const res = await probeBackends(raw, { timeoutMs: 500 });
+  const or = res.find((r) => r.name === "openrouter");
+  assert.ok(or, "openrouter row is present even with no base_url");
+  assert.equal(or.up, false);
+  assert.match(or.error, /OPENROUTER_API_KEY/);
+  assert.match(or.base_url, /openrouter\.ai/);
+});
+
 test("an unparseable config still probes the local engine", async (t) => {
   const s = startStub(18093, "m1");
   t.after(() => s.kill());
