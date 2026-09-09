@@ -128,9 +128,12 @@ echo "yardmaster-harness: node ${DSH_BIN} $*"
 ) &
 DSH_PID=$!
 
+# The proxy verifies the shared admin credential: env (YM_AUTH_USER/PASS,
+# forwarded here) wins, else the console-auth.json the Console setup writes.
 AP_LISTEN_PORT="${YM_HARNESS_PROXY_PORT}" \
 AP_TARGET_HOST=127.0.0.1 AP_TARGET_PORT="${YM_HARNESS_PORT}" \
 AP_REALM="Yardmaster Harness" AP_AUTH_FILE="${YM_AUTH_FILE}" \
+AP_AUTH_USER="${YM_AUTH_USER:-}" AP_AUTH_PASS="${YM_AUTH_PASS:-}" \
   node "${AUTH_PROXY}" &
 AP_PID=$!
 

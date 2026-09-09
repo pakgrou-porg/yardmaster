@@ -104,6 +104,27 @@ function writeAuthFile(user, password) {
     { mode: 0o600 },
   );
 }
+/**
+ * When the admin pre-seeds YM_AUTH_USER/PASS, mirror it into the shared
+ * console-auth.json so the Harness auth proxy (which reads that file) is
+ * unlocked too — one credential, one source of truth. No-op if the file
+ * already matches, or if the dir is not writable (e.g. a :ro mount).
+ */
+function syncEnvCredToFile() {
+  if (!envCreds) return;
+  try {
+    const rec = readAuthFile();
+    const matches =
+      rec &&
+      safeEq(rec.user, envCreds.user) &&
+      safeEq(scryptSync(envCreds.pass, Buffer.from(rec.salt, "hex"), 32), Buffer.from(rec.hash, "hex"));
+    if (!matches) writeAuthFile(envCreds.user, envCreds.pass);
+  } catch {
+    /* read-only / not our volume — the entrypoint also forwards the env creds */
+  }
+}
+syncEnvCredToFile();
+
 /** "disabled" | "env" | "configured" | "setup" */
 function authState() {
   if (AUTH_DISABLED) return "disabled";
