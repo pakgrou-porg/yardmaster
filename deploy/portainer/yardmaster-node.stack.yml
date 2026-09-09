@@ -31,6 +31,9 @@ services:
     environment:
       OLLAMA_HOST: "127.0.0.1:11434"
       OLLAMA_KEEP_ALIVE: "30m"
+      # Cap the context. Ollama's "vram-based default" can be enormous on a
+      # big-VRAM box / iGPU and some backends return garbage at that size.
+      OLLAMA_CONTEXT_LENGTH: "16384"
     ports:
       - "11435:11430"                              # inference proxy -> LAN
       - "${YM_BIND:-127.0.0.1}:8770:8770"          # Yardmaster Console

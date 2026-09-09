@@ -51,9 +51,15 @@ services:
       OLLAMA_HOST: "127.0.0.1:11434"          # loopback in the shared namespace
       OLLAMA_KEEP_ALIVE: "30m"
       OLLAMA_MAX_LOADED_MODELS: "3"
-      OLLAMA_NUM_PARALLEL: "4"
+      OLLAMA_NUM_PARALLEL: "2"
       OLLAMA_FLASH_ATTENTION: "1"
-      # HSA_OVERRIDE_GFX_VERSION: "11.0.0"    # rocminfo reports gfx1100 (native); only if CPU fallback
+      # REQUIRED on this iGPU. Without it Ollama auto-picks a huge "vram-based
+      # default context" (262144 -> a ~56 GB KV cache) and inference on the
+      # Radeon 8060S returns fluent-but-wrong gibberish. 16384 is plenty for the
+      # Harness agent prompt; raise only if you need long context and output
+      # stays coherent.
+      OLLAMA_CONTEXT_LENGTH: "16384"
+      # HSA_OVERRIDE_GFX_VERSION: "11.0.0"    # try if inference still degrades (forces the gfx1100 codepath)
     ports:
       - "11435:11430"                              # inference proxy -> LAN (plaintext)
       - "${YM_BIND:-127.0.0.1}:8770:8770"          # Yardmaster Console

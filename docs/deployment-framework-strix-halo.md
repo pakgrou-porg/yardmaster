@@ -303,9 +303,10 @@ Set on the `ollama` service (defaults in the stack are sane):
 
 | Variable | Suggested | Why |
 | --- | --- | --- |
+| `OLLAMA_CONTEXT_LENGTH` | `16384` | **required** — without it Ollama auto-picks a ~256k context / ~56 GB KV cache and this iGPU returns fluent-but-wrong gibberish. Raise only if long-context output stays coherent. |
 | `OLLAMA_KEEP_ALIVE` | `30m` or `-1` | keep big models resident |
 | `OLLAMA_MAX_LOADED_MODELS` | `3` | planner + worker + judge hot at once |
-| `OLLAMA_NUM_PARALLEL` | `4` | batch concurrent requests |
+| `OLLAMA_NUM_PARALLEL` | `2` | concurrent slots; `× OLLAMA_CONTEXT_LENGTH` = KV cells |
 | `OLLAMA_FLASH_ATTENTION` | `1` | faster, less memory for long context |
 | `OLLAMA_KV_CACHE_TYPE` | `q8_0` (optional) | big context without a big cache |
 
@@ -315,7 +316,10 @@ Set on the `ollama` service (defaults in the stack are sane):
 
 | Symptom | Fix |
 | --- | --- |
+| **Coherent-looking but nonsensical model output** (word salad, leaking `<\|...` tokens); `2+2` ≠ `4` even direct to Ollama | Ollama's auto context is too large for this iGPU. `docker exec yardmaster-ollama ollama ps` will show a multi-GB model / 131072 context. Set `OLLAMA_CONTEXT_LENGTH: "16384"` on `ollama` and redeploy. If it persists, add `HSA_OVERRIDE_GFX_VERSION: "11.0.0"` and/or `OLLAMA_FLASH_ATTENTION: "0"`. |
 | `ollama ps` shows `100% CPU` / "no compatible GPUs" | `rocminfo` reports the 8060S as `gfx1100`, natively supported. If a build still falls back to CPU, try `HSA_OVERRIDE_GFX_VERSION: "11.0.0"` on `ollama`. |
+| Console **Config** has no OpenRouter fields / no API-key box | the Config tab is a **raw `yardmaster.toml` editor** — paste [`yardmaster.toml.example`](../deploy/portainer/yardmaster.toml.example) (it has `[providers.openrouter]` + the model targets), Validate, Save. The key is **not** a field: set `OPENROUTER_API_KEY` in the stack env; the file references it via `api_key_env`. |
+| OpenRouter targets missing after redeploy | your old `yardmaster.toml` on the `yardmaster-data` volume persists across redeploys — it is not overwritten by the example. Replace it via the Console Config tab. |
 | ROCm sees only a few GB VRAM | raise the BIOS UMA carve-out (§1) |
 | `permission denied` on `/dev/kfd` | `sudo setsebool -P container_use_devices on`; confirm `group_add` = `getent group video render` |
 | `rocminfo` errors on a syscall | uncomment `security_opt: [seccomp=unconfined]` on `ollama` |
