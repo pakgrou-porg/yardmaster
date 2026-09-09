@@ -50,6 +50,7 @@ services:
       dockerfile: docker/Dockerfile
       target: runtime-proxy
     image: yardmaster:proxy-local
+    pull_policy: build             # built here, never pulled from a registry
     container_name: yardmaster
     restart: unless-stopped
     network_mode: "service:ollama"
@@ -81,7 +82,12 @@ services:
       # - /etc/yardmaster/yardmaster.toml:/config/yardmaster.toml:ro,Z
 
   yardmaster-harness:
-    image: yardmaster:proxy-local        # same image — overrides the entrypoint
+    build:                              # same image as `yardmaster` — Compose builds it once
+      context: "https://github.com/pakgrou-porg/yardmaster.git#main"
+      dockerfile: docker/Dockerfile
+      target: runtime-proxy
+    image: yardmaster:proxy-local        # overrides the entrypoint below
+    pull_policy: build
     container_name: yardmaster-harness
     restart: unless-stopped
     network_mode: "service:ollama"
