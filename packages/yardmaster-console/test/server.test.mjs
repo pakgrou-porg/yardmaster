@@ -85,6 +85,60 @@ test("server: /api/agent serves the tokened URL, host derived from the request",
   assert.equal(lan.base, "http://10.9.8.7:3080");
 });
 
+test("server: Basic Auth gates everything except /healthz when YM_AUTH_ENABLED", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "ymc-"));
+  writeFileSync(join(dir, "yardmaster.toml"), `schema_version = 1\n[targets]\n`);
+  process.env.YM_CONFIG_PATH = join(dir, "yardmaster.toml");
+  process.env.YM_CONFIG_FALLBACK = join(dir, "fallback.toml");
+  process.env.YM_METRICS_DB = join(dir, "none.db");
+  process.env.YM_AUTH_ENABLED = "1";
+  process.env.YM_AUTH_USER = "karl";
+  process.env.YM_AUTH_PASS = "s3cret";
+
+  const { createConsoleServer } = await import(`../src/server.mjs?auth`);
+  const srv = createConsoleServer();
+  await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+  const base = `http://127.0.0.1:${srv.address().port}`;
+  t.after(() => {
+    srv.close();
+    rmSync(dir, { recursive: true, force: true });
+    delete process.env.YM_AUTH_ENABLED;
+    delete process.env.YM_AUTH_USER;
+    delete process.env.YM_AUTH_PASS;
+  });
+
+  assert.equal((await fetch(`${base}/healthz`)).status, 200, "health probe stays open");
+
+  const noCreds = await fetch(`${base}/api/status`);
+  assert.equal(noCreds.status, 401);
+  assert.match(noCreds.headers.get("www-authenticate") || "", /Basic realm=/);
+
+  const wrong = await fetch(`${base}/api/status`, {
+    headers: { authorization: "Basic " + Buffer.from("karl:nope").toString("base64") },
+  });
+  assert.equal(wrong.status, 401);
+
+  const right = await fetch(`${base}/api/status`, {
+    headers: { authorization: "Basic " + Buffer.from("karl:s3cret").toString("base64") },
+  });
+  assert.equal(right.status, 200);
+  assert.equal((await right.json()).auth_enabled, true);
+
+  const spa = await fetch(`${base}/`, {
+    headers: { authorization: "Basic " + Buffer.from("karl:s3cret").toString("base64") },
+  });
+  assert.equal(spa.status, 200);
+});
+
+test("server: enabling auth without a password refuses to start", async () => {
+  process.env.YM_AUTH_ENABLED = "true";
+  process.env.YM_AUTH_USER = "karl";
+  delete process.env.YM_AUTH_PASS;
+  await assert.rejects(import(`../src/server.mjs?authbad`), /refusing to start open/);
+  delete process.env.YM_AUTH_ENABLED;
+  delete process.env.YM_AUTH_USER;
+});
+
 test("server: PUT replaces a dangling symlink at the config path", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "ymc-"));
   const cfgPath = join(dir, "yardmaster.toml");

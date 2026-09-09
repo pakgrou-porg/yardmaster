@@ -80,6 +80,10 @@ RUN ln -s /opt/yardmaster/node_modules/@deepseek-ai/dsh/lib/bin.js /usr/local/bi
 COPY docker/entrypoint.sh /usr/local/bin/yardmaster-entrypoint
 COPY docker/harness-entrypoint.sh /usr/local/bin/yardmaster-harness-entrypoint
 RUN chmod +x /usr/local/bin/yardmaster-entrypoint /usr/local/bin/yardmaster-harness-entrypoint
+# HTTP+WS reverse proxy with optional Basic Auth — publishes the loopback-only
+# Harness and, when the admin enables it, gates it behind a username/password.
+# Run as: node /opt/yardmaster/lib/yardmaster-auth-proxy.mjs
+COPY docker/auth-proxy.mjs /opt/yardmaster/lib/yardmaster-auth-proxy.mjs
 
 # All backend binaries live together so the broker resolves its siblings by
 # default (its --*-path flags default to ./ in the working directory).

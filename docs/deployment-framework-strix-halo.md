@@ -18,13 +18,14 @@ with `network_mode: service:ollama`, so all published ports are declared on
 | `yardmaster` (`--target runtime-proxy`) | the broker + Ollama proxy | loopback `:11435` in-namespace |
 | `yardmaster-lan-shim` (`socat`) | loopback→LAN bridge for the proxy | **host `:11435`** — point LAN clients here |
 | `yardmaster-harness` | the DeepSeek Harness Web UI (`dsh web`), own `yardmaster-harness` volume | loopback `:3080` in-namespace |
-| `yardmaster-harness-shim` (`socat`) | loopback→publish bridge for dsh | **`:3080`** — `${YM_BIND}` |
+| `yardmaster-harness-proxy` (Node) | loopback→publish bridge for dsh + optional Basic Auth + WS | **`:3080`** — `${YM_BIND}` |
 | `yardmaster-console` | config editor + backend health + metrics + link to the Harness | **`:8770`** — `${YM_BIND}` |
 
 **LAN access.** The Console and Harness publish on `127.0.0.1` by default. Set
 the stack env var **`YM_BIND=0.0.0.0`** to expose both to your LAN, and
 **`YM_LAN_HOST=<framework-ip>`** (e.g. `10.116.2.145`) so dsh's browser-trust
-fence accepts that authority. See §6.
+fence accepts that authority. Set **`YM_AUTH_ENABLED=1`** + `YM_AUTH_USER` +
+`YM_AUTH_PASS` to require a login on both. See §6.
 
 Stack file: [`../deploy/portainer/examples/framework-strix-halo.stack.yml`](../deploy/portainer/examples/framework-strix-halo.stack.yml).
 
@@ -224,6 +225,8 @@ vars (Portainer → *Stack* → *Environment variables*, or an `.env`):
 | --- | --- | --- |
 | `YM_BIND` | `0.0.0.0` | publish `:8770` (Console) and `:3080` (Harness) on every interface |
 | `YM_LAN_HOST` | your Framework LAN IP, e.g. `10.116.2.145` | added to dsh's `--trusted-host` list so a browser on `http://<ip>:3080` isn't rejected |
+| `YM_AUTH_ENABLED` | `1` | require HTTP Basic Auth in front of **both** the Console and the Harness |
+| `YM_AUTH_USER` / `YM_AUTH_PASS` | your choice | the credentials (or `YM_AUTH_PASS_FILE=/run/secrets/…` for a Docker secret) |
 
 Redeploy the stack after changing them. Then open **`http://<framework-ip>:8770`**
 (Console) from anywhere on the LAN; the Console's **Agent** tab links to
@@ -231,32 +234,31 @@ Redeploy the stack after changing them. Then open **`http://<framework-ip>:8770`
 the URL to match however *you* reached the Console, so the link works from
 loopback and from the LAN).
 
-> **SECURITY — read this before setting `YM_BIND=0.0.0.0`.**
-> - The **Console has no authentication**. Anyone who can reach `:8770` can
->   rewrite `yardmaster.toml` and see your backend list.
-> - The **Harness** runs model-generated code and is guarded only by a per-boot
->   launch token + a signed cookie. Anyone with the tokened URL gets a shell-ish
->   agent on that container.
->
-> On a trusted home LAN behind a single router this is usually acceptable. On
-> anything shared, either restrict the source in firewalld
-> (`firewall-cmd --add-rich-rule='rule family=ipv4 source address=10.116.2.0/24 port port=8770 protocol=tcp accept'`)
-> or put an authenticating reverse proxy in front — a minimal Caddy example:
->
-> ```caddyfile
-> # Caddyfile — `caddy run`, or a `caddy:2` sidecar publishing :8443
-> yard.example.lan {
->   basic_auth { karl JDJhJDE0... }   # caddy hash-password
->   @console path /* 
->   handle @console { reverse_proxy 127.0.0.1:8770 }
-> }
-> agent.example.lan {
->   basic_auth { karl JDJhJDE0... }
->   reverse_proxy 127.0.0.1:3080
-> }
+### Authentication (`YM_AUTH_ENABLED=1`)
+
+Set `YM_AUTH_ENABLED=1` + `YM_AUTH_USER` + `YM_AUTH_PASS` in the stack env / `.env`.
+That turns on HTTP Basic Auth for:
+
+- the **Console** (`:8770`) — enforced natively in the server;
+- the **Harness** (`:3080`) — enforced by the `yardmaster-harness-proxy` sidecar
+  (a small Node HTTP+WebSocket reverse proxy that replaces the old `socat` shim),
+  which sits in front of `dsh` and also proxies its WebSocket.
+
+The credentials live in the stack definition, so they are **durable across
+restarts and reboots**. With `YM_AUTH_ENABLED=1` the Console and the proxy
+**refuse to start** unless both user and pass are set — they never run open.
+`/healthz` stays open so the container health probe still works. This is *in
+addition to* dsh's own launch-token + signed cookie, not a replacement.
+
+> **Without auth**, anyone who reaches `:8770` can rewrite `yardmaster.toml`, and
+> anyone with the tokened Harness URL gets a shell-capable agent on that
+> container. On a trusted home LAN behind one router that is usually acceptable;
+> on anything shared, set `YM_AUTH_ENABLED=1` and/or restrict the source in
+> firewalld:
+> ```bash
+> sudo firewall-cmd --permanent --add-rich-rule=\
+> 'rule family="ipv4" source address="10.116.2.0/24" port port="8770" protocol="tcp" accept'
 > ```
-> With a proxy in front, keep `YM_BIND=127.0.0.1` and point the proxy at the
-> published loopback ports.
 
 Console tabs:
 
@@ -275,8 +277,10 @@ Console tabs:
 ## 7. DeepSeek Harness, routed through Yardmaster
 
 The Harness runs as the **`yardmaster-harness`** service — `dsh web` on
-in-namespace loopback `:3080`, published via the `yardmaster-harness-shim`
-`socat` sidecar (dsh refuses to bind `0.0.0.0` because it executes model code).
+in-namespace loopback `:3080` (dsh refuses to bind `0.0.0.0` because it executes
+model code), published via the **`yardmaster-harness-proxy`** sidecar (Node
+HTTP+WebSocket reverse proxy; adds Basic Auth when `YM_AUTH_ENABLED=1`, plain
+pass-through otherwise).
 
 **Token persistence.** `dsh` mints a fresh launch token every start, but on
 first use it sets a **signed cookie** derived from a secret in `DSH_HOME`. This
@@ -288,21 +292,28 @@ entrypoint (`docker/harness-entrypoint.sh`) also writes the *current* tokened
 URL to `/dshhome/web-url`, which the Console reads (mounted `:ro`) so its
 **Agent** tab always links to a working URL without you grepping logs.
 
-To point dsh's default model at the Yardmaster proxy without touching its UI,
-set on `yardmaster-harness`:
+**Do not pass `--set` via `YM_HARNESS_EXTRA_ARGS`.** `dsh web` only accepts
+`--host` / `--port` / `--trusted-host` / `--no-open`; `--set` is a *top-level*
+`dsh` flag and passing it here makes dsh exit (`unknown option '--set'`) and the
+service crash-loop — nothing then listens on `:3080`. The entrypoint strips a
+leading `--set …` pair with a warning, but don't rely on that.
 
-```yaml
-    environment:
-      YM_HARNESS_EXTRA_ARGS: >-
-        --set llm.openai.baseURL=http://127.0.0.1:11435/v1
-        --set llm.openai.apiKey=sk-unused
-        --set agent.defaultModel.provider=openai
-        --set agent.defaultModel.model=llama3.2
+To change the Harness's default model, use its **Settings** UI, or edit the
+persistent profile patch on the `yardmaster-harness` volume:
+
+```bash
+docker run --rm -v yardmaster-harness:/dshhome alpine sh -c \
+  'cat > /dshhome/profiles/web/cordis.patch.yml' <<'YAML'
+- id: agent-default-model
+  config:
+    provider: deepseek-official
+    model: deepseek-v4-flash
+YAML
+docker restart yardmaster-harness
 ```
 
-(Exact `--set` keys depend on the pinned dsh version. When
-`YM_DATAPLANE_MODE=dataplane` exists, switch to `dsh --profile yardmaster-web`
-and the adapter handles tiers + correlation.)
+When `YM_DATAPLANE_MODE=dataplane` exists, switch to `dsh --profile
+yardmaster-web` and the adapter handles tiers + correlation.
 
 ---
 
@@ -347,10 +358,13 @@ Set on the `ollama` service (defaults in the stack are sane):
 | Harness asks for the token again after every restart | you're not on a persistent `DSH_HOME` — confirm the `yardmaster-harness` volume is mounted at `/dshhome` and `yardmaster-init` chowned it to `10001` |
 | Console Agent tab shows a loopback URL from a LAN browser | old image — rebuild `yardmaster-console`; the current `/api/agent` rewrites the host from your request |
 | `yardmaster-harness` exits / `dsh: not found` | old `yardmaster:proxy-local` — rebuild; the Dockerfile symlinks `dsh` → `…/@deepseek-ai/dsh/lib/bin.js` |
+| `yardmaster-harness` crash-loops with `error: unknown option '--set'` | you passed `--set …` in `YM_HARNESS_EXTRA_ARGS` — `dsh web` doesn't take it. Remove that env var (or set the model via `cordis.patch.yml`, §7) and redeploy. |
+| Harness browser prompts for a username/password | `YM_AUTH_ENABLED=1` — enter `YM_AUTH_USER` / `YM_AUTH_PASS`. To turn it off, unset `YM_AUTH_ENABLED` and redeploy. |
+| `yardmaster-harness-proxy` won't start: `refusing to start open` | `YM_AUTH_ENABLED=1` but `YM_AUTH_USER` or `YM_AUTH_PASS` is empty — set both, or unset `YM_AUTH_ENABLED`. |
 | `nvpair-node-info: detected 0 GPU(s)` / `nvidia-smi unavailable` | expected on AMD — PAIR's telemetry is NVIDIA-only. Does **not** affect the engine's GPU use; only the scheduler's GPU-pressure / `vram_aware` signals, which don't matter for a single node. Tracked in [#48](https://github.com/pakgrou-porg/yardmaster/issues/48). |
 | SELinux `AVC` denial on a bind mount | add `:Z` (or `:z`) to that mount (the stack already has it on `yardmaster.toml`) |
 | Portainer build fails in `rust-build` | expected until [#36](https://github.com/pakgrou-porg/yardmaster/issues/36) — the stack uses `target: runtime-proxy`, which skips it; don't change the target |
-| "container name already in use" on redeploy | `docker rm -f yardmaster yardmaster-ollama yardmaster-console yardmaster-init yardmaster-lan-shim yardmaster-harness yardmaster-harness-shim` then redeploy (Portainer + explicit `container_name`) |
+| "container name already in use" on redeploy | `docker rm -f yardmaster yardmaster-ollama yardmaster-console yardmaster-init yardmaster-lan-shim yardmaster-harness yardmaster-harness-proxy` then redeploy (Portainer + explicit `container_name`). Also remove the old `yardmaster-harness-shim` if you deployed an earlier revision. |
 
 ---
 

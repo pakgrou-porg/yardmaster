@@ -17,14 +17,16 @@
  *   GET  /api/agent                  { url } for the embedded dsh Web UI
  *   GET  /  (and static assets)      the SPA
  *
- * Binds 127.0.0.1 by default. Set YM_CONSOLE_BIND=0.0.0.0 only behind your own
- * auth.
+ * Binds 127.0.0.1 by default. Set YM_CONSOLE_BIND=0.0.0.0 to serve the LAN; when
+ * you do, enable HTTP Basic Auth with YM_AUTH_ENABLED=1 + YM_AUTH_USER +
+ * YM_AUTH_PASS (or YM_AUTH_PASS_FILE). /healthz stays open for health probes.
  */
 
 import { createServer } from "node:http";
 import { readFile, writeFile, mkdir, access, lstat, unlink } from "node:fs/promises";
 import { constants as FS } from "node:fs";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { timingSafeEqual } from "node:crypto";
 import { join, extname, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
@@ -51,6 +53,46 @@ const cfg = {
   localEngineUrl: process.env.YM_LOCAL_ENGINE_URL || "",
   dataplaneBin: process.env.YM_DATAPLANE_BIN || "", // e.g. /opt/yardmaster/bin/yardmaster-dataplane
 };
+
+/**
+ * Optional HTTP Basic Auth. The admin opts in with YM_AUTH_ENABLED and supplies
+ * a username + password via the environment (durable: they live in the Portainer
+ * stack / .env, so they survive restarts). If enabled without both, we refuse to
+ * start rather than run open.
+ */
+const truthy = (v) => v === "1" || v === "true" || v === "yes" || v === "on";
+function buildAuth() {
+  const enabled = truthy(process.env.YM_AUTH_ENABLED);
+  if (!enabled) return { enabled: false };
+  let pass = process.env.YM_AUTH_PASS || "";
+  if (process.env.YM_AUTH_PASS_FILE) {
+    pass = readFileSync(process.env.YM_AUTH_PASS_FILE, "utf8").replace(/\r?\n$/, "");
+  }
+  const user = process.env.YM_AUTH_USER || "";
+  if (!user || !pass) {
+    throw new Error(
+      "YM_AUTH_ENABLED is set but YM_AUTH_USER / YM_AUTH_PASS are empty — refusing to start open",
+    );
+  }
+  return {
+    enabled: true,
+    realm: (process.env.YM_AUTH_REALM || "Yardmaster Console").replace(/"/g, ""),
+    expected: Buffer.from("Basic " + Buffer.from(`${user}:${pass}`).toString("base64")),
+  };
+}
+const auth = buildAuth();
+/** true if the request may proceed; false means a 401 was already sent. */
+function passedAuth(req, res) {
+  if (!auth.enabled) return true;
+  const got = Buffer.from(String(req.headers["authorization"] || ""));
+  if (got.length === auth.expected.length && timingSafeEqual(got, auth.expected)) return true;
+  res.writeHead(401, {
+    "www-authenticate": `Basic realm="${auth.realm}", charset="UTF-8"`,
+    "content-type": "text/plain",
+  });
+  res.end("401 Unauthorized\n");
+  return false;
+}
 
 const MIME = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".ico": "image/x-icon" };
 const json = (res, code, obj) => {
@@ -125,6 +167,7 @@ async function handleApi(req, res, url) {
       config_path: cfg.configPath,
       metrics_db: cfg.metricsDb,
       metrics_present: existsSync(cfg.metricsDb),
+      auth_enabled: auth.enabled,
       agent_url: cfg.agentUrl,
       local_engine_url: cfg.localEngineUrl || null,
       dataplane_dry_run: !!(cfg.dataplaneBin && existsSync(cfg.dataplaneBin)),
@@ -238,6 +281,8 @@ export function createConsoleServer() {
   return createServer(async (req, res) => {
     try {
       const url = new URL(req.url, `http://${req.headers.host || "console"}`);
+      // /healthz stays open so container health probes work without credentials.
+      if (url.pathname !== "/healthz" && !passedAuth(req, res)) return;
       if (url.pathname === "/healthz" || url.pathname.startsWith("/api/")) {
         await handleApi(req, res, url);
       } else {

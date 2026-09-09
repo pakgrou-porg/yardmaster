@@ -17,15 +17,23 @@
 # Ports:
 #   11435  -> yardmaster-lan-shim -> 127.0.0.1:11435 proxy   (LAN; plaintext)
 #    8770  -> Yardmaster Console                              (${YM_BIND})
-#    3080  -> yardmaster-harness-shim -> 127.0.0.1:3080 dsh   (${YM_BIND})
+#    3080  -> yardmaster-harness-proxy -> 127.0.0.1:3080 dsh  (${YM_BIND}; Basic Auth optional)
 #
 # LAN ACCESS: set the stack env var  YM_BIND=0.0.0.0  (default 127.0.0.1) to
 # expose the Console and Harness to your LAN, and set  YM_LAN_HOST=<framework-ip>
-# so dsh's browser-trust fence accepts that authority. SECURITY: the Console has
-# NO auth (anyone who can reach :8770 can rewrite yardmaster.toml) and dsh runs
-# model-generated code behind only a launch-token + signed cookie. On a shared
-# network put an authenticating reverse proxy in front (see the doc) or restrict
-# the source with firewalld.
+# so dsh's browser-trust fence accepts that authority.
+#
+# AUTHENTICATION (recommended whenever YM_BIND=0.0.0.0): set
+#   YM_AUTH_ENABLED=1  YM_AUTH_USER=<name>  YM_AUTH_PASS=<password>
+# in the Portainer stack env / .env. That adds HTTP Basic Auth in front of BOTH
+# the Console (:8770) and the Harness (:3080). It is durable — the credentials
+# live in the stack definition, so they survive restarts/reboots. With it on,
+# the Console and the Harness proxy REFUSE to start unless both user and pass are
+# set (they never run open). It does not replace dsh's own launch-token/cookie;
+# it is an extra gate. /healthz stays open for health probes.
+#
+# SECURITY without auth: anyone who can reach :8770 can rewrite yardmaster.toml,
+# and dsh runs model-generated code behind only a launch-token + signed cookie.
 
 
 services:
@@ -120,21 +128,35 @@ services:
       DSH_HOME: /dshhome
       YM_HARNESS_PORT: "3080"
       YM_HARNESS_TRUSTED_HOSTS: "127.0.0.1:3080 ${YM_LAN_HOST:-}:3080"
-      # Point dsh's default model at the Yardmaster proxy without touching its UI:
-      # YM_HARNESS_EXTRA_ARGS: "--set agent-default-model.provider=openai --set agent-default-model.model=llama3.2:latest"
+      # `dsh web` only accepts --host/--port/--trusted-host/--no-open. It does
+      # NOT accept `--set` (a top-level `dsh` flag) — passing it makes dsh exit
+      # ("unknown option '--set'") and this service crash-loops. Set the default
+      # model in /dshhome/profiles/web/cordis.patch.yml or the in-UI Settings.
+      # YM_HARNESS_EXTRA_ARGS: ""
     volumes:
       - yardmaster-harness:/dshhome
 
-  # dsh binds loopback only, so a published port can't reach it directly — this
-  # socat sidecar (same namespace) forwards 3081 -> 127.0.0.1:3080.
-  yardmaster-harness-shim:
-    image: alpine/socat:latest
-    container_name: yardmaster-harness-shim
+  # dsh binds loopback only and refuses 0.0.0.0, so a published port can't reach
+  # it directly. This sidecar forwards 3081 -> 127.0.0.1:3080 and, when
+  # YM_AUTH_ENABLED=1, gates it behind HTTP Basic Auth (user + password from the
+  # stack env — durable). Auth off = transparent pass-through. Proxies WebSocket
+  # upgrades (the dsh client opens one).
+  yardmaster-harness-proxy:
+    image: yardmaster:proxy-local        # bundles node + the auth-proxy script
+    container_name: yardmaster-harness-proxy
     restart: unless-stopped
     network_mode: "service:ollama"
     depends_on:
       yardmaster-harness: { condition: service_started }
-    command: ["-d", "TCP-LISTEN:3081,fork,reuseaddr", "TCP:127.0.0.1:3080"]
+    entrypoint: ["/usr/bin/tini", "--", "node", "/opt/yardmaster/lib/yardmaster-auth-proxy.mjs"]
+    environment:
+      AP_LISTEN_PORT: "3081"
+      AP_TARGET_HOST: "127.0.0.1"
+      AP_TARGET_PORT: "3080"
+      AP_REALM: "Yardmaster Harness"
+      AP_AUTH_ENABLED: "${YM_AUTH_ENABLED:-0}"
+      AP_AUTH_USER: "${YM_AUTH_USER:-}"
+      AP_AUTH_PASS: "${YM_AUTH_PASS:-}"
 
   yardmaster-console:
     build:
@@ -156,6 +178,11 @@ services:
       YM_CONFIG_PATH: /config/yardmaster.toml
       YM_CONFIG_FALLBACK: "/data/Nvidia Corporation/Personal AI Router/yardmaster.toml"
       YM_METRICS_DB: "/data/Nvidia Corporation/Personal AI Router/yardmaster-metrics.db"
+      # HTTP Basic Auth — same toggle + credentials as the Harness proxy.
+      YM_AUTH_ENABLED: "${YM_AUTH_ENABLED:-0}"
+      YM_AUTH_USER: "${YM_AUTH_USER:-}"
+      YM_AUTH_PASS: "${YM_AUTH_PASS:-}"
+      YM_AUTH_REALM: "Yardmaster Console"
     volumes:
       - yardmaster-data:/data
       - yardmaster-harness:/dshhome:ro             # read the current tokened URL

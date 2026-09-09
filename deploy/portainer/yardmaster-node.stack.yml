@@ -23,8 +23,12 @@
 #
 # LAN ACCESS: set stack env  YM_BIND=0.0.0.0  to expose the Console + Harness to
 # the LAN, and  YM_LAN_HOST=<this-host-ip>  so dsh trusts that authority.
-# SECURITY: the Console has no auth; dsh runs model code behind only a token +
-# cookie. Front them with an authenticating proxy or firewalld on a shared LAN.
+# AUTHENTICATION (recommended with YM_BIND=0.0.0.0): set  YM_AUTH_ENABLED=1
+# YM_AUTH_USER=<name>  YM_AUTH_PASS=<pw>  in the stack env / .env — adds HTTP
+# Basic Auth in front of BOTH the Console and the Harness, durable across
+# restarts. With it on, both refuse to start unless user+pass are set.
+# SECURITY without auth: anyone reaching :8770 can rewrite yardmaster.toml; dsh
+# runs model code behind only a token + cookie.
 #
 # CPU-only box: this stack. GPU box (ROCm/CUDA): see
 # deploy/portainer/examples/framework-strix-halo.stack.yml.
@@ -109,18 +113,33 @@ services:
       DSH_HOME: /dshhome
       YM_HARNESS_PORT: "3080"
       YM_HARNESS_TRUSTED_HOSTS: "127.0.0.1:3080 ${YM_LAN_HOST:-}:3080"
-      # YM_HARNESS_EXTRA_ARGS: "--set agent-default-model.provider=openai --set agent-default-model.model=llama3.2:latest"
+      # `dsh web` does NOT accept `--set` (top-level `dsh` flag) — passing it
+      # crash-loops the service. Configure the model in
+      # /dshhome/profiles/web/cordis.patch.yml or the in-UI Settings.
+      # YM_HARNESS_EXTRA_ARGS: ""
     volumes:
       - yardmaster-harness:/dshhome
 
-  yardmaster-harness-shim:
-    image: alpine/socat:latest
-    container_name: yardmaster-harness-shim
+  # Forwards 3081 -> 127.0.0.1:3080 (dsh refuses 0.0.0.0) and, when
+  # YM_AUTH_ENABLED=1, gates it behind HTTP Basic Auth (user + password from the
+  # stack env — durable across restarts). Auth off = transparent pass-through.
+  # Proxies the dsh client's WebSocket upgrade.
+  yardmaster-harness-proxy:
+    image: yardmaster:proxy-local        # bundles node + the auth-proxy script
+    container_name: yardmaster-harness-proxy
     restart: unless-stopped
     network_mode: "service:ollama"
     depends_on:
       yardmaster-harness: { condition: service_started }
-    command: ["-d", "TCP-LISTEN:3081,fork,reuseaddr", "TCP:127.0.0.1:3080"]
+    entrypoint: ["/usr/bin/tini", "--", "node", "/opt/yardmaster/lib/yardmaster-auth-proxy.mjs"]
+    environment:
+      AP_LISTEN_PORT: "3081"
+      AP_TARGET_HOST: "127.0.0.1"
+      AP_TARGET_PORT: "3080"
+      AP_REALM: "Yardmaster Harness"
+      AP_AUTH_ENABLED: "${YM_AUTH_ENABLED:-0}"
+      AP_AUTH_USER: "${YM_AUTH_USER:-}"
+      AP_AUTH_PASS: "${YM_AUTH_PASS:-}"
 
   yardmaster-console:
     build:
@@ -142,6 +161,11 @@ services:
       YM_CONFIG_PATH: /config/yardmaster.toml
       YM_CONFIG_FALLBACK: "/data/Nvidia Corporation/Personal AI Router/yardmaster.toml"
       YM_METRICS_DB: "/data/Nvidia Corporation/Personal AI Router/yardmaster-metrics.db"
+      # HTTP Basic Auth — same toggle + credentials as the Harness proxy.
+      YM_AUTH_ENABLED: "${YM_AUTH_ENABLED:-0}"
+      YM_AUTH_USER: "${YM_AUTH_USER:-}"
+      YM_AUTH_PASS: "${YM_AUTH_PASS:-}"
+      YM_AUTH_REALM: "Yardmaster Console"
     volumes:
       - yardmaster-data:/data
       - yardmaster-harness:/dshhome:ro
