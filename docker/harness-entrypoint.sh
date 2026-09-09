@@ -42,17 +42,27 @@ fi
 # every model in yardmaster.toml); fall back to just the default model. Add /
 # override explicitly with YM_HARNESS_MODELS="a,b,c".
 if [ -z "${YM_HARNESS_MODELS:-}" ]; then
-  _disc="$(node -e '
-    const u=(process.argv[1].replace(/\/+$/,""))+"/models";
-    const ac=new AbortController(); const t=setTimeout(()=>ac.abort(),4000);
-    fetch(u,{signal:ac.signal}).then(r=>r.json()).then(j=>{
-      clearTimeout(t);
-      const ids=(j.data||[]).map(m=>m.id).filter(Boolean);
-      if(ids.length) process.stdout.write(ids.join(","));
-    }).catch(()=>{});
-  ' "${YM_HARNESS_UPSTREAM}" 2>/dev/null || true)"
+  # Retry: a cold router (just started) may not answer /v1/models on the first try.
+  _disc=""
+  _i=0
+  while [ -z "${_disc}" ] && [ "${_i}" -lt "${YM_HARNESS_DISCOVER_TRIES:-8}" ]; do
+    _disc="$(node -e '
+      const u=(process.argv[1].replace(/\/+$/,""))+"/models";
+      const ac=new AbortController(); const t=setTimeout(()=>ac.abort(),4000);
+      fetch(u,{signal:ac.signal}).then(r=>r.json()).then(j=>{
+        clearTimeout(t);
+        const ids=(j.data||[]).map(m=>m.id).filter(Boolean);
+        if(ids.length) process.stdout.write(ids.join(","));
+      }).catch(()=>{});
+    ' "${YM_HARNESS_UPSTREAM}" 2>/dev/null || true)"
+    [ -z "${_disc}" ] && { _i=$((_i + 1)); sleep 3; }
+  done
   YM_HARNESS_MODELS="${_disc:-${YM_HARNESS_MODEL}}"
-  [ -n "${_disc}" ] && echo "yardmaster-harness: discovered models from ${YM_HARNESS_UPSTREAM}: ${YM_HARNESS_MODELS}"
+  if [ -n "${_disc}" ]; then
+    echo "yardmaster-harness: discovered models from ${YM_HARNESS_UPSTREAM}: ${YM_HARNESS_MODELS}"
+  else
+    echo "yardmaster-harness: WARNING model discovery from ${YM_HARNESS_UPSTREAM} failed after ${_i} tries — using ${YM_HARNESS_MODEL} only" >&2
+  fi
 fi
 case ",${YM_HARNESS_MODELS}," in
   *",${YM_HARNESS_MODEL},"*) ;;
