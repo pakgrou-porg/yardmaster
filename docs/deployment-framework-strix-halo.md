@@ -299,16 +299,31 @@ service crash-loop — nothing then listens on `:3080`. The entrypoint strips a
 leading `--set …` pair with a warning, but don't rely on that.
 
 To change the Harness's default model, use its **Settings** UI, or edit the
-persistent profile patch on the `yardmaster-harness` volume:
+persistent profile patch on the `yardmaster-harness` volume. `cordis.patch.yml`
+**must be a top-level YAML array** — an empty or malformed file makes dsh exit
+`must be a top-level YAML array of loader patch entries` and crash-loop. Write it
+with `printf` (do **not** pipe a heredoc into `docker run` without `-i`, which
+silently produces an empty file):
 
 ```bash
-docker run --rm -v yardmaster-harness:/dshhome alpine sh -c \
-  'cat > /dshhome/profiles/web/cordis.patch.yml' <<'YAML'
-- id: agent-default-model
-  config:
-    provider: deepseek-official
-    model: deepseek-v4-flash
-YAML
+docker run --rm -v yardmaster-harness:/dshhome alpine sh -c '
+  mkdir -p /dshhome/profiles/web
+  printf "%s\n" \
+    "- id: agent-default-model" \
+    "  config:" \
+    "    provider: deepseek-official" \
+    "    model: deepseek-v4-flash" \
+    > /dshhome/profiles/web/cordis.patch.yml
+  chown -R 10001:10001 /dshhome/profiles
+'
+docker restart yardmaster-harness
+```
+
+To undo an override, reset the file to an empty array:
+
+```bash
+docker run --rm -v yardmaster-harness:/dshhome alpine \
+  sh -c 'printf "[]\n" > /dshhome/profiles/web/cordis.patch.yml'
 docker restart yardmaster-harness
 ```
 
@@ -359,6 +374,7 @@ Set on the `ollama` service (defaults in the stack are sane):
 | Console Agent tab shows a loopback URL from a LAN browser | old image — rebuild `yardmaster-console`; the current `/api/agent` rewrites the host from your request |
 | `yardmaster-harness` exits / `dsh: not found` | old `yardmaster:proxy-local` — rebuild; the Dockerfile symlinks `dsh` → `…/@deepseek-ai/dsh/lib/bin.js` |
 | `yardmaster-harness` crash-loops with `error: unknown option '--set'` | you passed `--set …` in `YM_HARNESS_EXTRA_ARGS` — `dsh web` doesn't take it. Remove that env var (or set the model via `cordis.patch.yml`, §7) and redeploy. |
+| `yardmaster-harness` crash-loops: `cordis.patch.yml must be a top-level YAML array` | the overlay file is empty or malformed (often from piping a heredoc into `docker run` without `-i`). Reset it: `docker run --rm -v yardmaster-harness:/dshhome alpine sh -c 'printf "[]\n" > /dshhome/profiles/web/cordis.patch.yml'` then `docker restart yardmaster-harness`. The current entrypoint also auto-heals a blank file. |
 | Harness browser prompts for a username/password | `YM_AUTH_ENABLED=1` — enter `YM_AUTH_USER` / `YM_AUTH_PASS`. To turn it off, unset `YM_AUTH_ENABLED` and redeploy. |
 | `yardmaster-harness-proxy` won't start: `refusing to start open` | `YM_AUTH_ENABLED=1` but `YM_AUTH_USER` or `YM_AUTH_PASS` is empty — set both, or unset `YM_AUTH_ENABLED`. |
 | `nvpair-node-info: detected 0 GPU(s)` / `nvidia-smi unavailable` | expected on AMD — PAIR's telemetry is NVIDIA-only. Does **not** affect the engine's GPU use; only the scheduler's GPU-pressure / `vram_aware` signals, which don't matter for a single node. Tracked in [#48](https://github.com/pakgrou-porg/yardmaster/issues/48). |

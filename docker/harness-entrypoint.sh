@@ -21,6 +21,17 @@ URL_FILE="${DSH_HOME}/web-url"
 mkdir -p "${DSH_HOME}"
 : > "${URL_FILE}" || true
 
+# Guard the profile overlay. dsh requires cordis.patch.yml to be a top-level YAML
+# array; an empty or blank file (a common result of writing it with a heredoc
+# piped into `docker run` WITHOUT -i) makes dsh exit "must be a top-level YAML
+# array of loader patch entries" and the service crash-loops. If the file exists
+# but has no non-comment, non-whitespace content, reset it to an empty array.
+PATCH="${DSH_HOME}/profiles/web/cordis.patch.yml"
+if [ -f "${PATCH}" ] && ! grep -qE '^[[:space:]]*[^#[:space:]]' "${PATCH}"; then
+  echo "yardmaster-harness: WARNING ${PATCH} is empty/blank — resetting to []" >&2
+  printf '[]\n' > "${PATCH}"
+fi
+
 set -- web --no-open --host 127.0.0.1 --port "${YM_HARNESS_PORT}"
 for h in ${YM_HARNESS_TRUSTED_HOSTS}; do
   case "${h}" in "" | :* ) continue ;; esac   # skip empty / ":3080" from an unset YM_LAN_HOST
