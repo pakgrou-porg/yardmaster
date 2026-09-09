@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: 10-minute two-node soak, 20 concurrent streams
         run: |
           if [ -f tests/soak/docker-compose.yml ]; then
