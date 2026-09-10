@@ -110,6 +110,7 @@ services:
       YM_HARNESS_TRUSTED_HOSTS: "127.0.0.1:3080 ${YM_LAN_HOST:-}:3080"
       YM_HARNESS_UPSTREAM: http://127.0.0.1:4000/v1
       YM_HARNESS_MODEL: "${YM_HARNESS_MODEL:-deepseek-r1:32b}"
+      BRAVE_API_KEY: "${BRAVE_API_KEY:-}"          # for the Brave Search MCP server (see docs; cordis.user.yml)
       YM_AUTH_USER: "${YM_AUTH_USER:-}"
       YM_AUTH_PASS: "${YM_AUTH_PASS:-}"
     volumes:

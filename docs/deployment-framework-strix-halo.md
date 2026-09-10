@@ -322,6 +322,47 @@ config**.
 `dsh web` accepts only `--host` / `--port` / `--trusted-host` / `--no-open`. It
 does **not** accept `--set`.
 
+### Adding tools to the Harness (MCP)
+
+dsh has an **MCP client** (`@deepseek-ai/dsh-mcp-client`). Extra plugin entries
+go in **`$DSH_HOME/profiles/web/cordis.user.yml`** on the `yardmaster-harness`
+volume — the entrypoint appends that file verbatim after its managed block on
+every boot and never rewrites it.
+
+**Brave Search** (replaces dsh's built-in `web_search`, which needs a DeepSeek
+key). The Brave MCP server is bundled in the image; you only supply the key.
+
+1. Set `BRAVE_API_KEY` in the stack env (or `.env`) and redeploy.
+2. Write the overlay onto the volume:
+   ```bash
+   docker run --rm -i -v yardmaster-harness:/dshhome alpine sh -c \
+     'mkdir -p /dshhome/profiles/web && cat > /dshhome/profiles/web/cordis.user.yml && chown -R 10001:10001 /dshhome/profiles'
+   ```
+   then paste and Ctrl-D:
+   ```yaml
+   - insert:
+       - id: mcp-brave
+         name: '@deepseek-ai/dsh-mcp-client'
+         config:
+           serverName: brave
+           transport: stdio
+           command: brave-search-mcp-server     # bundled; or: npx -y @brave/brave-search-mcp-server
+           args: []
+           env:
+             BRAVE_API_KEY: !!js process.env.BRAVE_API_KEY
+   - id: web-search-deepseek
+     disabled: true
+   ```
+3. `docker restart yardmaster-harness`. The agent gets `mcp__brave__brave_web_search`
+   (and `brave_news_search`, `brave_local_search`, …); the broken `web_search`
+   is gone.
+
+Any MCP server works the same way — `npx -y <package>` for stdio servers (npm/npx
+are in the image; the cache persists on the volume), or `transport:
+streamable-http` + `url:` for a service. This is an interim mechanism;
+[ADR-0028](decisions/0028-capability-registry-pipeline.md) folds it into managed
+regions.
+
 ---
 
 ## 8. Confirm the GPU is working

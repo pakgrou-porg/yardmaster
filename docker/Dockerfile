@@ -49,7 +49,9 @@ RUN mkdir -p /out \
 # Stage — optional: DeepSeek Harness (dsh) for the in-container agent
 # ---------------------------------------------------------------------------
 FROM node:24-bookworm-slim AS dsh
-RUN npm i -g @deepseek-ai/dsh@0.1.2-rc.1 && npm cache clean --force
+# dsh + a Brave Search MCP server (opt-in via cordis.user.yml; needs BRAVE_API_KEY).
+RUN npm i -g @deepseek-ai/dsh@0.1.2-rc.1 @brave/brave-search-mcp-server \
+    && npm cache clean --force
 
 # ---------------------------------------------------------------------------
 # Stage — console-build: the Yardmaster Console (bundled into runtime-base)
@@ -94,8 +96,16 @@ RUN useradd --system --create-home --uid 10001 --shell /usr/sbin/nologin yardmas
 # node + dsh (the Harness) and the bundled Console share one node runtime.
 COPY --from=dsh /usr/local/lib/node_modules /opt/yardmaster/node_modules
 COPY --from=dsh /usr/local/bin/node /usr/local/bin/node
-# @deepseek-ai/dsh's bin is lib/bin.js (a `#!/usr/bin/env node` script).
-RUN ln -s /opt/yardmaster/node_modules/@deepseek-ai/dsh/lib/bin.js /usr/local/bin/dsh
+# @deepseek-ai/dsh's bin is lib/bin.js (a `#!/usr/bin/env node` script). Also
+# expose npm/npx (for MCP servers added via `npx -y …`) and the bundled Brave
+# Search MCP server. All resolve inside the copied global node_modules tree.
+RUN set -e; \
+    ln -s /opt/yardmaster/node_modules/@deepseek-ai/dsh/lib/bin.js /usr/local/bin/dsh; \
+    ln -s /opt/yardmaster/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm; \
+    ln -s /opt/yardmaster/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx; \
+    printf '#!/bin/sh\nexec node /opt/yardmaster/node_modules/@brave/brave-search-mcp-server/dist/index.js "$@"\n' \
+      > /usr/local/bin/brave-search-mcp-server; \
+    chmod +x /usr/local/bin/brave-search-mcp-server
 # The Yardmaster Console (config editor + backend probes + metrics + Agent link).
 COPY --from=console-build /console /opt/yardmaster/console
 # The interim Node data plane — config-driven routing (repo issue #36 replaces it).

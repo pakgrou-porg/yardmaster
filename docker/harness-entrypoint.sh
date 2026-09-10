@@ -32,6 +32,12 @@ if [ "$(id -u)" = "0" ]; then
   exec gosu 10001:10001 "$0" "$@"
 fi
 
+# gosu keeps the env but not HOME; npm/npx (for MCP servers spawned via `npx -y`)
+# need a writable HOME + a cache that persists on the volume.
+export HOME=/home/yardmaster
+export npm_config_cache="${npm_config_cache:-${DSH_HOME}/.npm-cache}"
+mkdir -p "${npm_config_cache}" 2>/dev/null || true
+
 : "${YM_HARNESS_PORT:=3080}"
 : "${YM_HARNESS_PROXY_PORT:=3081}"
 : "${YM_HARNESS_TRUSTED_HOSTS:=127.0.0.1:${YM_HARNESS_PORT}}"
@@ -116,6 +122,17 @@ if [ "${write_overlay}" = "1" ]; then
     printf '%s\n' "    model: ${YM_HARNESS_MODEL}"
   } > "${PATCH}"
   echo "yardmaster-harness: dsh -> yardmaster proxy ${YM_HARNESS_UPSTREAM} (models: ${YM_HARNESS_MODELS}; default ${YM_HARNESS_MODEL})"
+
+  # Un-managed extension point: your own cordis patch entries (extra plugins,
+  # e.g. an MCP server via `- insert:`) appended verbatim after the managed
+  # block on every boot. This file is never rewritten. Superseded by the
+  # capability-registry regions in ADR-0028.
+  USER_PATCH="${PROFILE}/cordis.user.yml"
+  if [ -f "${USER_PATCH}" ] && grep -qE '^[[:space:]]*[^#[:space:]]' "${USER_PATCH}"; then
+    printf '# --- appended from cordis.user.yml (user-owned) ---\n' >> "${PATCH}"
+    cat "${USER_PATCH}" >> "${PATCH}"
+    echo "yardmaster-harness: appended ${USER_PATCH}"
+  fi
 fi
 
 # --- build the `dsh web` argv -------------------------------------------

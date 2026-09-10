@@ -145,6 +145,11 @@ If the markers are missing but a non-managed `llm-pi-ai` / `agent-default-model`
 entry exists, the pipeline treats the file as fully user-owned and does nothing
 (logs once).
 
+*Interim (until P1):* `harness-entrypoint.sh` regenerates the whole
+`cordis.patch.yml` each boot and appends a user-owned
+`cordis.user.yml` (extra plugin entries — MCP servers via `- insert:`, etc.)
+verbatim after its block. The region model replaces this.
+
 **Operator overrides never live in the generated file.** They go in
 `[harness.overrides.<id>]` (`enabled`, `rank`, `context_window`,
 `capabilities.*`, `default = true`) and are read at stage 4/5, so a managed
