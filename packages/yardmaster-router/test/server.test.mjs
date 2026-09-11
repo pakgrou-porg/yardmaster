@@ -4,7 +4,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -201,4 +201,61 @@ target = "m"
   });
   assert.equal(r.status, 200, "router swallowed the two 429s and got the 200");
   assert.equal(r.headers.get("x-yardmaster-retries"), "2", "two retries recorded");
+});
+
+test("router: capability reconcile writes the managed region into DSH_HOME and serves /v1/capabilities", async (t) => {
+  const engine = startStub(19601, "llama3.2:latest,deepseek-r1:32b", "engine-cap");
+  const dir = mkdtempSync(join(tmpdir(), "ymr-cap-"));
+  const cfgPath = join(dir, "yardmaster.toml");
+  const dshHome = join(dir, "dshhome");
+  mkdirSync(join(dshHome, "profiles/web"), { recursive: true }); // the harness entrypoint's boot-time scaffold
+  writeFileSync(
+    cfgPath,
+    `schema_version = 1
+[providers.local]
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:19601"
+[targets]
+[targets.small]
+id = "llama3.2:latest"
+locality = "lan"
+provider = "local"
+[targets.big]
+id = "deepseek-r1:32b"
+locality = "lan"
+provider = "local"
+[routes.default]
+id = "auto"
+type = "passthrough"
+target = "big"
+`,
+  );
+  const srv = spawn(process.execPath, [fileURLToPath(new URL("../src/server.mjs", import.meta.url))], {
+    env: {
+      ...process.env,
+      YM_ROUTER_PORT: "19600",
+      YM_ROUTER_CONFIG: cfgPath,
+      YM_METRICS_DB: join(dir, "m.db"),
+      YM_HARNESS_DSH_HOME: dshHome,
+      YM_CAPABILITIES_RECONCILE_S: "3600", // rely on the boot-time reconcile only
+    },
+    stdio: "ignore",
+  });
+  t.after(() => {
+    engine.kill();
+    srv.kill();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  await wait(1500); // config load + debounce + probe + write
+
+  const caps = await (await fetch("http://127.0.0.1:19600/v1/capabilities")).json();
+  const ids = caps.applied.map((e) => e.id).sort();
+  assert.deepEqual(ids, ["deepseek-r1:32b", "llama3.2:latest"]);
+  assert.equal(caps.applied_default, "deepseek-r1:32b"); // routes.default.target
+  assert.equal(caps.pending_ops.length, 0);
+
+  const patch = readFileSync(join(dshHome, "profiles/web/cordis.patch.yml"), "utf8");
+  assert.match(patch, /BEGIN yardmaster-managed/);
+  assert.match(patch, /id: "deepseek-r1:32b"/);
+  assert.match(patch, /model: "deepseek-r1:32b"/);
 });

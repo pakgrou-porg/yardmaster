@@ -97,8 +97,9 @@ yardmaster-data      -> /data     (yardmaster container)
   ├── yardmaster-metrics.db
   ├── console-auth.json      ← the admin credential (scrypt hash)
   └── logs/
-yardmaster-harness   -> /dshhome  (yardmaster-harness container; mounted :ro in yardmaster)
-  profiles/web/cordis.patch.yml   ← auto-written dsh config; sessions; cookie secret; web-url
+yardmaster-harness   -> /dshhome  (yardmaster-harness container; mounted rw in
+                                   yardmaster too — it writes the model list)
+  profiles/web/cordis.patch.yml   ← managed region (ADR-0028) + sessions; cookie secret; web-url
 ```
 
 Each entrypoint chowns its own volume on start — no `yardmaster-init`.
@@ -150,20 +151,33 @@ docker exec -it yardmaster /opt/yardmaster/bin/nvpair-tui
 it executes model code), published via its **auth-proxy** child
 (`docker/auth-proxy.mjs`, a dependency-free Node HTTP + WebSocket reverse proxy).
 
-**Auto-configured for Yardmaster.** The entrypoint writes
-`$DSH_HOME/profiles/web/cordis.patch.yml` (marker on line 1) configuring
-`@deepseek-ai/dsh-llm-pi-ai` with a `yardmaster` route
-(`baseURL: http://127.0.0.1:11435/v1`, `api: openai-completions`, `models:` from
-`YM_HARNESS_MODELS`) and `agent-default-model` = that route + `YM_HARNESS_MODEL`
-(default `deepseek-r1:32b`). `dsh` therefore routes every request through the
-Yardmaster proxy with no manual step. A hand-written overlay without the marker
-on line 1 is left untouched. `dsh web` does **not** accept `--set`.
+**Auto-configured for Yardmaster.** The `yardmaster` service's **capability
+registry** (ADR-0028, `packages/yardmaster-router/src/capabilities.mjs`)
+discovers models from `[targets.*]` in `yardmaster.toml`, probes each
+provider's `/v1/models`, and writes a managed region — delimited by
+`# BEGIN yardmaster-managed` / `# END yardmaster-managed` markers, everything
+else in the file is left untouched — into
+`$DSH_HOME/profiles/web/cordis.patch.yml` configuring `@deepseek-ai/dsh-llm-pi-ai`
+with a `yardmaster` route (`baseURL: http://127.0.0.1:<YM_ROUTER_PORT>/v1`) and
+`agent-default-model` (default `deepseek-r1:32b`, from `[harness].default_model`
+or `YM_HARNESS_DEFAULT_MODEL`). It reconciles on every config change and every
+`YM_CAPABILITIES_RECONCILE_S` (default 60s); dsh's profile hot-reloads the
+patch, so `dsh` routes every request through Yardmaster with no restart.
+`harness-entrypoint.sh` itself no longer generates any of this — it only
+scaffolds the dsh profile on first boot. Every write is gated on
+`dsh --dump-config` exiting 0 and reverts to a `.lkg` snapshot on failure.
+Inspect the live state at `GET /v1/capabilities` on the router; destructive
+changes (removals not caused by an operator override, default changes not
+caused by explicit config) are held in `pending_ops` for
+`POST /v1/capabilities/apply` rather than auto-applied. `dsh web` does **not**
+accept `--set`.
 
 **Persistence.** `DSH_HOME` is the dedicated `yardmaster-harness` volume, so the
 signed-cookie secret, sessions, and credentials survive restarts. The entrypoint
 also writes the current tokened URL to `$DSH_HOME/web-url`; the `yardmaster`
-container mounts that volume `:ro` and its Console **Agent** tab embeds/links it
-(host rewritten to match your request).
+container mounts that same volume **read-write** (it writes the managed model
+list into `cordis.patch.yml`, ADR-0028) and its Console **Agent** tab
+embeds/links the tokened URL (host rewritten to match your request).
 
 **LAN + auth.** `${YM_BIND:-127.0.0.1}` gates the published `:8770`/`:3080`. Set
 `YM_BIND=0.0.0.0` + `YM_LAN_HOST=<host-ip>` for the LAN. Auth is **on by

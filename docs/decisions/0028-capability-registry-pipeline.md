@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # 28. Capability registry pipeline for the Harness model list
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-09-09
 - Deciders: @pakgrou-porg
 - Supersedes the ad-hoc discovery in
@@ -185,13 +185,37 @@ profile scaffold exists and tolerates an absent region on first boot.
   pipeline or keeps it as the dsh-facing projection layer; the registry schema
   and the config surface are the stable contract.
 
+### P1 implementation deviations from the text above
+
+- **Stage 8 (apply) is a synchronous write-then-gate-then-revert, not an
+  async `.next` + `rename()`.** dsh's `--dump-config` only ever reads the
+  fixed path `$DSH_HOME/profiles/web/cordis.patch.yml` — there is no flag to
+  point it at a candidate file — so there is nothing to gate *before*
+  touching the real path. `writeManagedRegion()` instead: snapshots the
+  current file to `.lkg`, writes the new content directly to the real path,
+  runs `dsh --profile web --dump-config`, and on a non-zero exit copies
+  `.lkg` back over the real path. The observable contract (bad renders never
+  stick, `.lkg` always holds the last good state) is the same; the write is
+  just briefly visible mid-gate instead of appearing atomically.
+- **No separate async post-apply health-probe rollback (the second half of
+  stage 9) in P1.** dsh's live patch reload means a bad config surfaces as an
+  immediate `--dump-config` failure, which the synchronous gate above already
+  catches — every schema mistake made by hand earlier in this project was
+  exactly this failure mode. A true post-boot health-probe rollback (watching
+  the Harness process for a crash loop *after* a syntactically valid but
+  semantically bad config) is deferred to a later phase if it proves
+  necessary in practice.
+
 ## Phasing
 
-- **P1** — registry schema + pipeline (stages 1–9), `GET /v1/capabilities` +
-  `POST /v1/capabilities/{reconcile,apply}`, marker-region **additive-only
-  auto-apply** + pending-plan for destructive ops + `.lkg` rollback,
-  `[harness.overrides]` + `[harness.policy]` + validator support, entrypoint
-  stops generating. Reconcile on hot-reload + interval.
+- **P1** — registry schema + pipeline (stages 1–8; see deviations above for
+  stage 9), `GET /v1/capabilities` + `POST /v1/capabilities/{reconcile,apply}`,
+  marker-region **additive-only auto-apply** + pending-plan for destructive
+  ops + `.lkg` rollback, `[harness.overrides]` + `[harness.policy]` +
+  validator support, entrypoint stops generating. Reconcile on hot-reload +
+  interval. **Done** — `packages/yardmaster-router/src/capabilities.mjs`,
+  wired into `server.mjs`; `harness-entrypoint.sh` no longer generates the
+  models block.
 - **P2** — Console "Capabilities" tab: table (id / provider / locality /
   reachability / policy / rank / default), toggles that write back to
   `[harness.overrides]`, "view plan" / "apply now".

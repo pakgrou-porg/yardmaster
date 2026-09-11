@@ -125,3 +125,21 @@ target = "local_r1_32b"
 # type = "escalation"
 # weak_target = "local_llama32"
 # strong_target = "or_claude_sonnet5"
+
+# --------------------------------------------------------------- DeepSeek Harness
+# The Harness's model list is discovered automatically from the [targets.*]
+# above (ADR-0028) — nothing required here. [harness] only lets you steer it:
+#
+# [harness]
+# default_model = "local_r1_32b"        # else falls back to [routes.default].target
+#
+# [harness.policy]
+# deny_glob = ["*:free", "*-preview*"]  # never offer these ids to the agent
+# min_context_window = 4096             # hide anything smaller (when known)
+# rank_by_locality = { cluster = 0, lan = 10, remote = 20 }   # preference order
+#
+# [harness.overrides."qwen/qwen3.8-flash"]
+# enabled = true                        # wins over policy.deny_glob for this id
+# rank = 1                              # more preferred than the locality default
+# default = false                       # set true to force it as the default model
+

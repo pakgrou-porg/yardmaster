@@ -123,3 +123,76 @@ test("bad ingress port and bad placement policy are rejected", () => {
   hasErr(validateConfig(`schema_version=1\n[targets]\n[ingress]\nollama_port=70000\n`), "1..65535");
   hasErr(validateConfig(`schema_version=1\n[targets]\n[placement]\npolicy="fastest"\n`), "pair_default | warm_first | vram_aware");
 });
+
+test("[harness]: a valid registry config (policy + overrides) passes with warnings only for unknown ids", () => {
+  const r = validateConfig(`
+schema_version = 1
+[targets]
+[targets.x]
+id = "local-model"
+[harness]
+default_model = "local-model"
+[harness.policy]
+deny_glob = ["*:free"]
+min_context_window = 4096
+rank_by_locality = { cluster = 0, lan = 10, remote = 20 }
+[harness.overrides."local-model"]
+enabled = true
+rank = 1
+context_window = 8192
+default = true
+[harness.overrides.capabilities]
+capabilities = { tools = true, vision = false }
+`);
+  ok(r, "valid harness config");
+  assert.ok(r.warnings.some((w) => w.includes('"capabilities" matches no')));
+});
+
+test("[harness]: unknown keys at every level are rejected", () => {
+  const r = validateConfig(`
+schema_version = 1
+[targets]
+[harness]
+bogus = 1
+[harness.policy]
+bogus = 1
+[harness.overrides.x]
+bogus = 1
+`);
+  hasErr(r, "unknown key `harness.bogus`");
+  hasErr(r, "unknown key `harness.policy.bogus`");
+  hasErr(r, 'unknown key `harness.overrides."x".bogus`');
+});
+
+test("[harness]: type errors are rejected (enabled, rank, context_window, capabilities.*)", () => {
+  const r = validateConfig(`
+schema_version = 1
+[targets]
+[harness.overrides.x]
+enabled = "yes"
+rank = "1"
+context_window = -5
+[harness.overrides.x.capabilities]
+tools = "yes"
+`);
+  hasErr(r, "harness.overrides.\"x\".enabled` must be a boolean");
+  hasErr(r, "harness.overrides.\"x\".rank` must be a number");
+  hasErr(r, "harness.overrides.\"x\".context_window` must be a positive integer");
+});
+
+test("[harness]: more than one override with default = true is a warning, not an error", () => {
+  const r = validateConfig(`
+schema_version = 1
+[targets]
+[targets.a]
+id = "a"
+[targets.b]
+id = "b"
+[harness.overrides.a]
+default = true
+[harness.overrides.b]
+default = true
+`);
+  ok(r, "multiple defaults is a warning");
+  assert.ok(r.warnings.some((w) => w.includes("only the first one wins")));
+});

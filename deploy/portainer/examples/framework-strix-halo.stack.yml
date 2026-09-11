@@ -23,7 +23,8 @@
 # ---- stack environment variables (Portainer > Stack > Environment, or .env) ----
 #   YM_BIND          127.0.0.1 (default) | 0.0.0.0   expose Console + Harness to the LAN
 #   YM_LAN_HOST      e.g. 10.116.2.145               added to dsh's --trusted-host
-#   YM_HARNESS_MODEL deepseek-r1:32b (default)       dsh's default model, routed via Yardmaster
+#   YM_HARNESS_DEFAULT_MODEL deepseek-r1:32b (default)  Harness default model (fallback for
+#                                                    [harness].default_model in yardmaster.toml)
 #   YM_AUTH_USER / YM_AUTH_PASS                      pre-seed the admin login; if unset,
 #                                                    the Console shows a one-time setup page
 #                                                    and nothing works until you set one
@@ -106,6 +107,10 @@ services:
       YM_CONFIG_PATH: /config/yardmaster.toml
       YM_CONFIG_FALLBACK: "/data/Nvidia Corporation/Personal AI Router/yardmaster.toml"
       YM_METRICS_DB: "/data/Nvidia Corporation/Personal AI Router/yardmaster-metrics.db"
+      # Capability registry (ADR-0028): discovers the Harness's model list from
+      # yardmaster.toml + live provider probes, writes it into cordis.patch.yml.
+      # Prefer [harness].default_model in the TOML; this is only a fallback.
+      YM_HARNESS_DEFAULT_MODEL: "${YM_HARNESS_DEFAULT_MODEL:-deepseek-r1:32b}"
       # Auth (shared with the Harness). Leave USER/PASS empty for the setup page.
       YM_AUTH_USER: "${YM_AUTH_USER:-}"
       YM_AUTH_PASS: "${YM_AUTH_PASS:-}"
@@ -114,7 +119,7 @@ services:
       OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
     volumes:
       - yardmaster-data:/data
-      - yardmaster-harness:/dshhome:ro              # read the current tokened URL
+      - yardmaster-harness:/dshhome                 # rw: writes the Harness's model list (ADR-0028)
       # Manage yardmaster.toml from the host (keep :ro,Z for SELinux). Create the
       # file first: sudo install -Dm644 deploy/portainer/yardmaster.toml.example \
       #   /etc/yardmaster/yardmaster.toml
@@ -140,8 +145,10 @@ services:
       YM_HARNESS_PORT: "3080"
       YM_HARNESS_PROXY_PORT: "3081"
       YM_HARNESS_TRUSTED_HOSTS: "127.0.0.1:3080 ${YM_LAN_HOST:-}:3080"
-      YM_HARNESS_UPSTREAM: http://127.0.0.1:4000/v1   # the router (autorouting); use :11435/v1 for the local-only proxy
-      YM_HARNESS_MODEL: "${YM_HARNESS_MODEL:-deepseek-r1:32b}"
+      # No model config here — the `yardmaster` container's capability
+      # registry (ADR-0028) writes the Harness's model list directly into this
+      # volume. Set the default via [harness].default_model in yardmaster.toml,
+      # or YM_HARNESS_DEFAULT_MODEL on the `yardmaster` service.
       BRAVE_API_KEY: "${BRAVE_API_KEY:-}"          # for the Brave Search MCP server (see docs; cordis.user.yml)
       YM_AUTH_USER: "${YM_AUTH_USER:-}"
       YM_AUTH_PASS: "${YM_AUTH_PASS:-}"

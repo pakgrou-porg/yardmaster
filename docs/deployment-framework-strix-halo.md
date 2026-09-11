@@ -180,7 +180,7 @@ two LAN vLLM nodes. Adjust addresses / model ids to your network. The Console's
    | --- | --- | --- |
    | `YM_BIND` | *(leave unset → 127.0.0.1)* | `0.0.0.0` for LAN |
    | `YM_LAN_HOST` | — | `10.116.2.145` (your IP) |
-   | `YM_HARNESS_MODEL` | `deepseek-r1:32b` (default) | any model Yardmaster can route |
+   | `YM_HARNESS_DEFAULT_MODEL` | `deepseek-r1:32b` (default) | any model Yardmaster can route — fallback for `[harness].default_model` |
    | `OPENROUTER_API_KEY` | your key | — |
    | `YM_AUTH_USER` / `YM_AUTH_PASS` | *(optional)* leave unset to use the browser setup page | — |
 
@@ -224,10 +224,14 @@ curl -s -D- -o /dev/null http://127.0.0.1:11435/v1/chat/completions \
   -d '{"model":"llama3.2:latest","messages":[{"role":"user","content":"say hi"}]}'
 #   x-yardmaster-target: <target>   x-yardmaster-provider: <provider>   x-yardmaster-locality: lan
 
-# 7. the Harness auto-config points dsh at the router
-docker exec yardmaster-harness sh -c 'grep -E "baseURL:|model:" /dshhome/profiles/web/cordis.patch.yml'
-#   baseURL: http://127.0.0.1:4000/v1
-#   model: deepseek-r1:32b
+# 7. the capability registry (ADR-0028) discovered your targets and wrote
+#    the Harness's model list
+curl -s http://127.0.0.1:11435/v1/capabilities | python3 -m json.tool | head -40
+#   -> records[] with reachability:"validated", applied[] listing the ids
+#      it wrote into cordis.patch.yml, applied_default: the Harness's default
+docker exec yardmaster-harness sh -c 'grep -E "id:|model:" /dshhome/profiles/web/cordis.patch.yml'
+#   id: "deepseek-r1:32b" (and friends)
+#   model: "deepseek-r1:32b"
 ```
 
 Then open **`http://127.0.0.1:8770`** in a browser, log in, and check:
@@ -290,32 +294,50 @@ real names from <https://ollama.com/library>). At minimum pull the Harness
 default:
 
 ```bash
-docker exec yardmaster-ollama ollama pull deepseek-r1:32b     # ~19 GB, the YM_HARNESS_MODEL default
+docker exec yardmaster-ollama ollama pull deepseek-r1:32b     # ~19 GB, the YM_HARNESS_DEFAULT_MODEL default
 docker exec yardmaster-ollama ollama pull llama3.2:latest     # ~2 GB, a fast smoke-test model
 ```
 
 `deepseek-r1:32b` is a reasoning model — its replies include `<think>…</think>`
-blocks. Fine for chat; if you want terser agent behaviour set `YM_HARNESS_MODEL`
+blocks. Fine for chat; if you want terser agent behaviour set
+`[harness].default_model` in `yardmaster.toml` (or `YM_HARNESS_DEFAULT_MODEL`)
 to a non-reasoning model you have pulled.
 
 ---
 
 ## 7. The Harness, routed through Yardmaster
 
-`yardmaster-harness` writes `$DSH_HOME/profiles/web/cordis.patch.yml` on every
-start (first line `# managed by yardmaster-harness-entrypoint`) configuring
-`@deepseek-ai/dsh-llm-pi-ai` with a `yardmaster` provider route
-(`baseURL: http://127.0.0.1:11435/v1`, `api: openai-completions`, `models:` =
-`YM_HARNESS_MODELS`) and `agent-default-model` = that route + `YM_HARNESS_MODEL`.
-So `dsh` sends every request through the Yardmaster proxy with **no manual
-config**.
+The `yardmaster` service's **capability registry** (ADR-0028) discovers models
+from `[targets.*]` in `yardmaster.toml`, probes each provider's `/v1/models`,
+and writes a managed region into
+`$DSH_HOME/profiles/web/cordis.patch.yml` (between `# BEGIN yardmaster-managed`
+/ `# END yardmaster-managed` markers) configuring `@deepseek-ai/dsh-llm-pi-ai`
+with a `yardmaster` provider route (`baseURL: http://127.0.0.1:4000/v1`) and
+`agent-default-model`. It reconciles on every config change and every 60s
+(`YM_CAPABILITIES_RECONCILE_S`), so `dsh` sends every request through the
+Yardmaster router with **no manual config**, and a Console **Save** takes
+effect within a reconcile cycle — no restart. `yardmaster-harness` itself no
+longer generates any of this; it only scaffolds the dsh profile on first boot.
 
-- Change the default: set `YM_HARNESS_MODEL` (and optionally
-  `YM_HARNESS_MODELS="a,b,c"` to list more) and redeploy, or use the Harness
-  **Settings** UI.
-- To hand-write the profile instead, put your own `cordis.patch.yml` with real
-  entries (no manage-marker on line 1) on the `yardmaster-harness` volume — the
-  entrypoint then leaves it alone.
+- **Change the default**: set `[harness].default_model` in `yardmaster.toml`
+  (wins), or `YM_HARNESS_DEFAULT_MODEL` in the stack env (fallback), and
+  either Save in the Console or redeploy.
+- **Steer which models the Harness offers**: `[harness.policy]`
+  (`deny_glob`, `min_context_window`, `rank_by_locality`) and
+  `[harness.overrides."<model-id>"]` (`enabled`, `rank`, `context_window`,
+  `capabilities.*`, `default`) in `yardmaster.toml` — see the commented
+  example in
+  [`yardmaster.toml.example`](../deploy/portainer/yardmaster.toml.example).
+  An override always wins over policy for that id.
+- **Inspect the live registry**: `GET /v1/capabilities` on the router
+  (`:11435` or `:4000` inside the container) — every discovered model with its
+  `reachability`/`policy`/`rank`, the currently-applied list and default, and
+  any `pending_ops` awaiting approval (destructive changes — removals not
+  caused by an override, or default changes not caused by explicit config —
+  are held, not auto-applied; see ADR-0028). Approve them with
+  `POST /v1/capabilities/apply`.
+- Content outside the managed region (including the `cordis.user.yml` merge
+  used for MCP servers below) is never touched by the pipeline.
 - `DSH_HOME` is the dedicated `yardmaster-harness` volume, so the signed-cookie
   secret, sessions, and credentials persist across restarts.
 
@@ -359,9 +381,11 @@ key). The Brave MCP server is bundled in the image; you only supply the key.
 
 Any MCP server works the same way — `npx -y <package>` for stdio servers (npm/npx
 are in the image; the cache persists on the volume), or `transport:
-streamable-http` + `url:` for a service. This is an interim mechanism;
-[ADR-0028](decisions/0028-capability-registry-pipeline.md) folds it into managed
-regions.
+streamable-http` + `url:` for a service. `cordis.user.yml` is merged once
+(idempotently, marker-guarded) by `harness-entrypoint.sh` on boot and lives
+entirely outside the capability registry's managed region
+([ADR-0028](decisions/0028-capability-registry-pipeline.md)) — the two never
+collide.
 
 ---
 
@@ -405,8 +429,9 @@ Set on the `ollama` service (defaults in the stack are sane):
 | `403` at `:8770` / can't reach the setup page | you set `YM_AUTH_DISABLED=1` **and** something else 403'd, or you hit `/api/*` before setup — open `/` in a browser first. |
 | Harness browser: `503 ... set an admin username/password in the Console first` | do the first-run setup on `:8770` (or set `YM_AUTH_USER`/`YM_AUTH_PASS`). The proxy shares that credential. |
 | Harness browser: `Blocked request. This host is not allowed` | `dsh`'s trust fence — set `YM_LAN_HOST` to the exact IP you type in the URL bar and redeploy (or add `YM_HARNESS_TRUSTED_HOSTS="a:3080 b:3080"`). |
-| `yardmaster-harness` crash-loops: `provider "yardmaster" resolves no models` | old image, or `YM_HARNESS_MODEL` empty — the entrypoint must list the model. Rebuild; set `YM_HARNESS_MODEL`. |
-| `yardmaster-harness` crash-loops: `cordis.patch.yml must be a top-level YAML array` | a malformed hand-written overlay. Reset it: `docker run --rm -v yardmaster-harness:/dshhome alpine sh -c 'printf "[]\n" > /dshhome/profiles/web/cordis.patch.yml'` then `docker restart yardmaster-harness`. |
+| `yardmaster-harness` crash-loops: `provider "yardmaster" resolves no models` | the `yardmaster` service hasn't reconciled yet, or none of your `[targets.*]` probed as `validated`. Check `GET /v1/capabilities`; confirm `yardmaster-harness:/dshhome` is mounted **rw** on the `yardmaster` service (not `:ro`); `docker restart yardmaster-harness` after the registry has applied at least one entry. |
+| `yardmaster-harness` crash-loops: `cordis.patch.yml must be a top-level YAML array` | the capability registry's write-gate should prevent this (`dsh --dump-config` gates every write; a bad write reverts from `.lkg`) — if you still hit it, something hand-edited the file outside the managed region. Reset it: `docker run --rm -v yardmaster-harness:/dshhome alpine sh -c 'printf "[]\n" > /dshhome/profiles/web/cordis.patch.yml'` then `docker restart yardmaster yardmaster-harness` (the registry rewrites its region on the next reconcile). |
+| `GET /v1/capabilities` shows a model stuck `pending_ops` and never applied | destructive changes (a removal not caused by an operator override, or a default change not caused by explicit `[harness]`/`[routes.default]` config) are held for approval by design (ADR-0028, additive-only auto-apply). Review the op, then `POST /v1/capabilities/apply` (or fix `yardmaster.toml` so the change becomes operator-driven and reconcile again). |
 | router: `model "X" matches no target and there is no [routes.default]` | add a `[targets.*]` with `id = "X"`, or a `[routes.default]` — then Save in the Console (the router hot-reloads). |
 | router: `provider "openrouter": OPENROUTER_API_KEY is not set` | set `OPENROUTER_API_KEY` in the stack env and redeploy. |
 | router: `all upstreams failed` for a LAN vLLM model | check the `base_url` in `yardmaster.toml` and that `curl <base_url>/models` works from the `yardmaster` container. |

@@ -24,9 +24,20 @@ export XDG_CONFIG_HOME="${DATA_DIR}"
 # Self-heal volume ownership, then drop privileges. The stack runs this service
 # as root (`user: "0:0"`) so a first-deploy, root-owned named volume becomes
 # writable without a separate init container.
+#
+# The capability-registry pipeline (ADR-0028) also writes into the Harness's
+# DSH_HOME volume (mounted rw here). Chown it too, defensively: on a brand
+# new deploy this container's reconcile can run before yardmaster-harness's
+# own entrypoint has had a chance to chown it itself, which would otherwise
+# EACCES the very first write (self-heals once the harness container starts,
+# but there is no reason to wait on that race).
 if [ "$(id -u)" = "0" ]; then
   mkdir -p "${DATA_DIR}"
   chown -R 10001:10001 "${DATA_DIR}" 2>/dev/null || true
+  DSH_HOME_DIR="${YM_HARNESS_DSH_HOME:-/dshhome}"
+  if [ -d "${DSH_HOME_DIR}" ]; then
+    chown -R 10001:10001 "${DSH_HOME_DIR}" 2>/dev/null || true
+  fi
   exec gosu 10001:10001 "$0" "$@"
 fi
 

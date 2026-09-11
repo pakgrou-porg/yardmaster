@@ -30,7 +30,15 @@ export function parseConfig(rawText) {
   try {
     doc = parseToml(rawText || "");
   } catch (e) {
-    return { ok: false, errors: [`TOML parse error: ${e.message}`], providers: {}, targets: {}, routes: {}, egress: {} };
+    return {
+      ok: false,
+      errors: [`TOML parse error: ${e.message}`],
+      providers: {},
+      targets: {},
+      routes: {},
+      egress: {},
+      harness: {},
+    };
   }
   const providers = doc.providers ?? {};
   const targets = {};
@@ -42,7 +50,8 @@ export function parseConfig(rawText) {
     allow_remote: (doc.egress ?? {}).allow_remote === true,
     allow_lan: (doc.egress ?? {}).allow_lan !== false, // default true
   };
-  return { ok: true, errors: [], providers, targets, routes, egress };
+  const harness = doc.harness && typeof doc.harness === "object" ? doc.harness : {};
+  return { ok: true, errors: [], providers, targets, routes, egress, harness };
 }
 
 /** `cluster` | `lan` | `remote` -> is egress to it allowed by `[egress]`? */
@@ -52,7 +61,10 @@ export function egressAllowed(locality, egress) {
   return true; // cluster / unset
 }
 
-function providerEndpoint(providerName, providers) {
+/** Resolve a `[providers.*]` entry to its base URL / key / kind. Exported for
+ * the capability-registry prober (`capabilities.mjs`), which probes every
+ * provider a target references the same way the request path does. */
+export function providerEndpoint(providerName, providers) {
   const p = providers[providerName];
   if (!p) return { error: `provider "${providerName}" is not defined` };
   const kind = p.kind || "openai_compatible";

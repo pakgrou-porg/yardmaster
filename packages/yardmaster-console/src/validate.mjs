@@ -34,6 +34,12 @@ const TARGET_KEYS = new Set([
   "id", "llm_client", "provider", "locality", "extra_body", "extra_headers",
   "context_window", "tool_calling", "reasoning", "vision",
 ]);
+// [harness] — the DeepSeek Harness capability registry (ADR-0028).
+const HARNESS_KEYS = new Set(["default_model", "policy", "overrides"]);
+const HARNESS_POLICY_KEYS = new Set(["deny_glob", "min_context_window", "rank_by_locality"]);
+const HARNESS_OVERRIDE_KEYS = new Set(["enabled", "rank", "context_window", "capabilities", "default"]);
+const HARNESS_CAPABILITY_FLAGS = new Set(["tools", "vision", "reasoning"]);
+const LOCALITIES_FOR_RANK = new Set(["cluster", "lan", "remote"]);
 const PROVIDER_KEYS = new Set([
   "kind", "base_url", "api_key_env", "api_key_ref", "models_allow", "models_deny",
   "rate_limit_rpm", "budget_usd_per_day", "timeout_s", "pricing", "media",
@@ -194,6 +200,77 @@ export function validateConfig(rawText) {
     const at = `tiers.${name}`;
     if (!TIER_ROLES.has(t.role)) errors.push(`\`${at}.role\` must be planner | worker | judge`);
     if (!Array.isArray(t.models) || t.models.length === 0) errors.push(`\`${at}.models\` must be a non-empty list`);
+  }
+
+  // ---- harness (ADR-0028 capability registry) ---------------------------
+  const declaredIds = new Set(Object.values(targets).map((t) => t?.id).filter(Boolean));
+  if ("harness" in doc) {
+    const h = doc.harness ?? {};
+    for (const k of Object.keys(h)) {
+      if (!HARNESS_KEYS.has(k)) errors.push(`unknown key \`harness.${k}\``);
+    }
+    if (h.default_model !== undefined) {
+      if (typeof h.default_model !== "string" || !h.default_model) {
+        errors.push("`harness.default_model` must be a non-empty string");
+      } else if (!declaredIds.has(h.default_model)) {
+        warnings.push(`\`harness.default_model\` = "${h.default_model}" matches no [targets.*].id — it will be ignored`);
+      }
+    }
+    const policy = h.policy ?? {};
+    for (const k of Object.keys(policy)) {
+      if (!HARNESS_POLICY_KEYS.has(k)) errors.push(`unknown key \`harness.policy.${k}\``);
+    }
+    if (policy.deny_glob !== undefined && !(Array.isArray(policy.deny_glob) && policy.deny_glob.every((g) => typeof g === "string"))) {
+      errors.push("`harness.policy.deny_glob` must be a list of strings");
+    }
+    if (policy.min_context_window !== undefined && !(Number.isInteger(policy.min_context_window) && policy.min_context_window >= 0)) {
+      errors.push("`harness.policy.min_context_window` must be a non-negative integer");
+    }
+    if (policy.rank_by_locality !== undefined) {
+      if (typeof policy.rank_by_locality !== "object" || policy.rank_by_locality === null) {
+        errors.push("`harness.policy.rank_by_locality` must be a table");
+      } else {
+        for (const [k, v] of Object.entries(policy.rank_by_locality)) {
+          if (!LOCALITIES_FOR_RANK.has(k)) errors.push(`unknown key \`harness.policy.rank_by_locality.${k}\` (must be cluster | lan | remote)`);
+          else if (typeof v !== "number") errors.push(`\`harness.policy.rank_by_locality.${k}\` must be a number`);
+        }
+      }
+    }
+    const overrides = h.overrides ?? {};
+    let defaultOverrides = 0;
+    for (const [id, ov] of Object.entries(overrides)) {
+      const at = `harness.overrides."${id}"`;
+      if (!declaredIds.has(id)) warnings.push(`\`${at}\` — "${id}" matches no [targets.*].id; the override will be ignored until it does`);
+      if (ov === null || typeof ov !== "object") {
+        errors.push(`\`${at}\` must be a table`);
+        continue;
+      }
+      for (const k of Object.keys(ov)) {
+        if (!HARNESS_OVERRIDE_KEYS.has(k)) errors.push(`unknown key \`${at}.${k}\``);
+      }
+      if (ov.enabled !== undefined && typeof ov.enabled !== "boolean") errors.push(`\`${at}.enabled\` must be a boolean`);
+      if (ov.rank !== undefined && typeof ov.rank !== "number") errors.push(`\`${at}.rank\` must be a number`);
+      if (ov.context_window !== undefined && !(Number.isInteger(ov.context_window) && ov.context_window > 0)) {
+        errors.push(`\`${at}.context_window\` must be a positive integer`);
+      }
+      if (ov.default !== undefined) {
+        if (typeof ov.default !== "boolean") errors.push(`\`${at}.default\` must be a boolean`);
+        else if (ov.default === true) defaultOverrides++;
+      }
+      if (ov.capabilities !== undefined) {
+        if (typeof ov.capabilities !== "object" || ov.capabilities === null) {
+          errors.push(`\`${at}.capabilities\` must be a table`);
+        } else {
+          for (const [k, v] of Object.entries(ov.capabilities)) {
+            if (!HARNESS_CAPABILITY_FLAGS.has(k)) errors.push(`unknown key \`${at}.capabilities.${k}\``);
+            else if (typeof v !== "boolean") errors.push(`\`${at}.capabilities.${k}\` must be a boolean`);
+          }
+        }
+      }
+    }
+    if (defaultOverrides > 1) {
+      warnings.push(`\`harness.overrides\` sets \`default = true\` on ${defaultOverrides} entries — only the first one wins`);
+    }
   }
 
   // ---- ingress / placement / discovery ---------------------------------

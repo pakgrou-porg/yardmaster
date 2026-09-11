@@ -9,15 +9,27 @@
  *
  * Endpoints:
  *   GET  /healthz
- *   GET  /v1/models            every routable model id
- *   POST /v1/chat/completions  OpenAI Chat Completions (stream + non-stream)
- *   GET  /api/tags             Ollama-style model list
- *   POST /api/chat             Ollama chat (translated to/from OpenAI)
+ *   GET  /v1/models                 every routable model id
+ *   POST /v1/chat/completions       OpenAI Chat Completions (stream + non-stream)
+ *   GET  /api/tags                  Ollama-style model list
+ *   POST /api/chat                  Ollama chat (translated to/from OpenAI)
+ *   GET  /v1/capabilities           the capability registry (ADR-0028 P1)
+ *   POST /v1/capabilities/reconcile run the pipeline now
+ *   POST /v1/capabilities/apply     approve every held (pending) op
  *
  * Env: YM_ROUTER_PORT (4000), YM_ROUTER_BIND (127.0.0.1),
  *      YM_ROUTER_CONFIG (/config/yardmaster.toml),
  *      YM_CONFIG_FALLBACK ("/data/Nvidia Corporation/Personal AI Router/yardmaster.toml"),
  *      YM_METRICS_DB (same default dir).
+ *
+ * Capability registry (ADR-0028 P1) — discovers the Harness's model list from
+ * yardmaster.toml + live provider probes and writes it into a delimited region
+ * of $DSH_HOME/profiles/web/cordis.patch.yml (dsh hot-reloads it):
+ *   YM_HARNESS_DSH_HOME (/dshhome), YM_DSH_BIN (the dsh CLI, for the
+ *   `--dump-config` gate before every write), YM_HARNESS_UPSTREAM (derived
+ *   from YM_ROUTER_PORT), YM_HARNESS_DEFAULT_MODEL (fallback for
+ *   [harness].default_model), YM_CAPABILITIES_RECONCILE_S (60),
+ *   YM_CAPABILITIES_PROBE_TIMEOUT_MS (4000).
  */
 
 import { createServer } from "node:http";
@@ -25,6 +37,14 @@ import { readFileSync, statSync, existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { parseConfig, resolveRoute, knownModels, sniffUsage } from "./router.mjs";
 import { openMetrics } from "./metrics.mjs";
+import {
+  parseHarnessConfig,
+  probeCapabilitySources,
+  runPipeline,
+  writeManagedRegion,
+  makeDshValidator,
+  parseAppliedRegion,
+} from "./capabilities.mjs";
 
 const cfg = {
   port: Number(process.env.YM_ROUTER_PORT || 4000),
@@ -42,10 +62,21 @@ const cfg = {
   retryBaseMs: Number(process.env.YM_ROUTER_RETRY_BASE_MS || 600),
 };
 
+// Capability-registry pipeline (ADR-0028 P1) — Harness model discovery. Off by
+// default unless the Harness's DSH_HOME is actually mounted here.
+const capCfg = {
+  dshHome: process.env.YM_HARNESS_DSH_HOME || "/dshhome",
+  dshBin: process.env.YM_DSH_BIN || "/opt/yardmaster/node_modules/@deepseek-ai/dsh/lib/bin.js",
+  upstream: process.env.YM_HARNESS_UPSTREAM || `http://127.0.0.1:${Number(process.env.YM_ROUTER_PORT || 4000)}/v1`,
+  reconcileIntervalMs: Number(process.env.YM_CAPABILITIES_RECONCILE_S || 60) * 1000,
+  probeTimeoutMs: Number(process.env.YM_CAPABILITIES_PROBE_TIMEOUT_MS || 4000),
+};
+capCfg.patchPath = `${capCfg.dshHome}/profiles/web/cordis.patch.yml`;
+
 const metrics = openMetrics(cfg.metricsDb);
 
 // --- config load + hot reload --------------------------------------------
-let config = { ok: false, errors: ["not loaded"], providers: {}, targets: {}, routes: {}, egress: {} };
+let config = { ok: false, errors: ["not loaded"], providers: {}, targets: {}, routes: {}, egress: {}, harness: {} };
 let loadedFrom = null;
 let loadedMtime = 0;
 
@@ -54,11 +85,29 @@ function activePath() {
   if (existsSync(cfg.fallbackConfigPath)) return cfg.fallbackConfigPath;
   return null;
 }
+
+// --- capability registry (ADR-0028 P1) -------------------------------------
+// Declared before loadConfig()'s first (synchronous, module-load-time) call
+// below, which calls scheduleReconcile() as soon as a config parses — that
+// would otherwise read `reconcileTimer` while it's still in the temporal
+// dead zone.
+let registry = {
+  records: new Map(),
+  desired: null,
+  plan: { appliedEntries: [], appliedDefaultId: null, pendingOps: [] },
+  lastReconcileMs: 0,
+  lastError: null,
+};
+let previousApplied = existsSync(capCfg.patchPath) ? parseAppliedRegion(readFileSync(capCfg.patchPath, "utf8") || "") : null;
+const dshValidator = makeDshValidator({ dshBin: existsSync(capCfg.dshBin) ? capCfg.dshBin : null, dshHome: capCfg.dshHome });
+let reconcileTimer = null;
+let reconciling = false;
+
 function loadConfig(force = false) {
   const p = activePath();
   if (!p) {
     if (loadedFrom !== null || force) console.error("yardmaster-router: no yardmaster.toml found");
-    config = { ok: false, errors: ["no yardmaster.toml"], providers: {}, targets: {}, routes: {}, egress: {} };
+    config = { ok: false, errors: ["no yardmaster.toml"], providers: {}, targets: {}, routes: {}, egress: {}, harness: {} };
     loadedFrom = null;
     return;
   }
@@ -78,12 +127,82 @@ function loadConfig(force = false) {
       `yardmaster-router: loaded ${p} — ${n} target(s), egress remote=${config.egress.allow_remote} lan=${config.egress.allow_lan}` +
         (config.ok ? "" : ` [errors: ${config.errors.join("; ")}]`),
     );
+    scheduleReconcile();
   } catch (e) {
     console.error(`yardmaster-router: failed to read ${p}: ${e.message}`);
   }
 }
 loadConfig(true);
 setInterval(() => loadConfig(false), 3000).unref();
+
+async function reconcileNow() {
+  if (reconciling) return; // coalesce overlapping triggers
+  if (!config.ok || Object.keys(config.targets).length === 0) return;
+  reconciling = true;
+  try {
+    const harnessCfg = parseHarnessConfig(config);
+    // [harness].default_model in yardmaster.toml is the source of truth; this
+    // env var is only a fallback for operators who haven't set it there yet.
+    if (!harnessCfg.defaultModel && process.env.YM_HARNESS_DEFAULT_MODEL) {
+      harnessCfg.defaultModel = process.env.YM_HARNESS_DEFAULT_MODEL;
+    }
+    const probeMap = await probeCapabilitySources(config, { timeoutMs: capCfg.probeTimeoutMs });
+    const { records, desired, plan } = runPipeline(config, probeMap, harnessCfg, previousApplied);
+    registry = { records, desired, plan, lastReconcileMs: Date.now(), lastError: null };
+
+    if (!existsSync(capCfg.dshHome)) return; // no Harness volume mounted here — registry still computed, nothing to write
+
+    const result = await writeManagedRegion({
+      patchPath: capCfg.patchPath,
+      entries: plan.appliedEntries,
+      defaultId: plan.appliedDefaultId,
+      upstream: capCfg.upstream,
+      validate: dshValidator,
+    });
+    if (result.applied) {
+      previousApplied = { entries: plan.appliedEntries, defaultId: plan.appliedDefaultId };
+      console.log(
+        `yardmaster-router: capabilities applied — ${plan.appliedEntries.length} model(s), default=${plan.appliedDefaultId}` +
+          (plan.pendingOps.length ? `, ${plan.pendingOps.length} pending op(s) held` : ""),
+      );
+    } else if (result.error) {
+      registry.lastError = result.error;
+      console.error(
+        `yardmaster-router: capabilities write rejected by dsh --dump-config (rolled back to last-known-good): ${result.error.slice(0, 500)}`,
+      );
+    }
+  } catch (e) {
+    registry.lastError = String(e.message || e);
+    console.error(`yardmaster-router: capabilities reconcile failed: ${registry.lastError}`);
+  } finally {
+    reconciling = false;
+  }
+}
+function scheduleReconcile() {
+  clearTimeout(reconcileTimer);
+  reconcileTimer = setTimeout(reconcileNow, 500).unref(); // debounce rapid config saves
+}
+setInterval(reconcileNow, capCfg.reconcileIntervalMs).unref();
+scheduleReconcile();
+
+/** POST /v1/capabilities/apply — approve every held (pending) op: write the
+ * full "desired" state (what the registry computed with nothing withheld). */
+async function forceApplyPending() {
+  if (!registry.desired) return { applied: false, error: "no registry computed yet" };
+  if (!existsSync(capCfg.dshHome)) return { applied: false, error: "no Harness volume mounted here" };
+  const result = await writeManagedRegion({
+    patchPath: capCfg.patchPath,
+    entries: registry.desired.entries,
+    defaultId: registry.desired.defaultId,
+    upstream: capCfg.upstream,
+    validate: dshValidator,
+  });
+  if (result.applied || result.unchanged) {
+    previousApplied = { entries: registry.desired.entries, defaultId: registry.desired.defaultId };
+    registry.plan = { appliedEntries: registry.desired.entries, appliedDefaultId: registry.desired.defaultId, pendingOps: [] };
+  }
+  return result;
+}
 
 // --- helpers ------------------------------------------------------------
 const readBody = (req) =>
@@ -420,6 +539,25 @@ const server = createServer(async (req, res) => {
         errors: config.errors,
         targets: Object.keys(config.targets).length,
       });
+    }
+    if (p === "/v1/capabilities" && req.method === "GET") {
+      return json(res, 200, {
+        records: [...registry.records.values()],
+        applied: registry.plan.appliedEntries,
+        applied_default: registry.plan.appliedDefaultId,
+        desired_default: registry.desired?.defaultId ?? null,
+        pending_ops: registry.plan.pendingOps,
+        last_reconcile_ms: registry.lastReconcileMs,
+        last_error: registry.lastError,
+      });
+    }
+    if (p === "/v1/capabilities/reconcile" && req.method === "POST") {
+      await reconcileNow();
+      return json(res, 200, { pending_ops: registry.plan.pendingOps, applied: registry.plan.appliedEntries.length });
+    }
+    if (p === "/v1/capabilities/apply" && req.method === "POST") {
+      const result = await forceApplyPending();
+      return json(res, result.applied || result.unchanged ? 200 : 502, result);
     }
     if (p === "/v1/models" && req.method === "GET") {
       return json(res, 200, {

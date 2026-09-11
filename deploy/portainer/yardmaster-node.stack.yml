@@ -6,16 +6,19 @@
 #
 # THREE containers (ADR-0026), zero manual steps:
 #   ollama              the engine. Owns the network namespace.
-#   yardmaster          PAIR broker + proxy + the bundled Console + a LAN bridge.
-#                       Self-chowns its volume, drops to uid 10001.
+#   yardmaster          PAIR broker + proxy + router + Console + a LAN bridge.
+#                       Self-chowns its volume, drops to uid 10001. Also runs
+#                       the capability registry (ADR-0028) that discovers and
+#                       writes the Harness's model list.
 #   yardmaster-harness  `dsh web` auto-pointed at Yardmaster, behind Basic Auth.
 #
 # Ports (published on `ollama`):
-#   11435 -> LAN bridge -> 127.0.0.1:11435 proxy   inference clients
+#   11435 -> LAN bridge -> 127.0.0.1:4000 router   inference clients (autorouting)
 #    8770  Yardmaster Console                       ${YM_BIND} (default 127.0.0.1)
 #    3080  DeepSeek Harness                         ${YM_BIND}
 #
-# Env: YM_BIND (0.0.0.0 for LAN), YM_LAN_HOST (<this-host-ip>), YM_HARNESS_MODEL,
+# Env: YM_BIND (0.0.0.0 for LAN), YM_LAN_HOST (<this-host-ip>),
+#      YM_HARNESS_DEFAULT_MODEL (fallback for [harness].default_model),
 #      YM_AUTH_USER / YM_AUTH_PASS (pre-seed; else a one-time setup page),
 #      YM_AUTH_DISABLED=1 (loopback dev only), OPENROUTER_API_KEY.
 #
@@ -78,13 +81,17 @@ services:
       YM_CONFIG_PATH: /config/yardmaster.toml
       YM_CONFIG_FALLBACK: "/data/Nvidia Corporation/Personal AI Router/yardmaster.toml"
       YM_METRICS_DB: "/data/Nvidia Corporation/Personal AI Router/yardmaster-metrics.db"
+      # Capability registry (ADR-0028): discovers the Harness's model list from
+      # yardmaster.toml + live provider probes, writes it into cordis.patch.yml.
+      # Prefer [harness].default_model in the TOML; this is only a fallback.
+      YM_HARNESS_DEFAULT_MODEL: "${YM_HARNESS_DEFAULT_MODEL:-deepseek-r1:32b}"
       YM_AUTH_USER: "${YM_AUTH_USER:-}"
       YM_AUTH_PASS: "${YM_AUTH_PASS:-}"
       YM_AUTH_DISABLED: "${YM_AUTH_DISABLED:-}"
       OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
     volumes:
       - yardmaster-data:/data
-      - yardmaster-harness:/dshhome:ro
+      - yardmaster-harness:/dshhome                 # rw: writes the Harness's model list (ADR-0028)
       # Manage yardmaster.toml from the host (keep :ro,Z for SELinux):
       # - /etc/yardmaster/yardmaster.toml:/config/yardmaster.toml:ro,Z
 
@@ -108,8 +115,10 @@ services:
       YM_HARNESS_PORT: "3080"
       YM_HARNESS_PROXY_PORT: "3081"
       YM_HARNESS_TRUSTED_HOSTS: "127.0.0.1:3080 ${YM_LAN_HOST:-}:3080"
-      YM_HARNESS_UPSTREAM: http://127.0.0.1:4000/v1
-      YM_HARNESS_MODEL: "${YM_HARNESS_MODEL:-deepseek-r1:32b}"
+      # No model config here — the `yardmaster` container's capability
+      # registry (ADR-0028) writes the Harness's model list directly into this
+      # volume. Set the default via [harness].default_model in yardmaster.toml,
+      # or YM_HARNESS_DEFAULT_MODEL on the `yardmaster` service.
       BRAVE_API_KEY: "${BRAVE_API_KEY:-}"          # for the Brave Search MCP server (see docs; cordis.user.yml)
       YM_AUTH_USER: "${YM_AUTH_USER:-}"
       YM_AUTH_PASS: "${YM_AUTH_PASS:-}"
