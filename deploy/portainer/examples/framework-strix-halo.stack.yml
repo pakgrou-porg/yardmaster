@@ -23,6 +23,13 @@
 # ---- stack environment variables (Portainer > Stack > Environment, or .env) ----
 #   YM_BIND          127.0.0.1 (default) | 0.0.0.0   expose Console + Harness to the LAN
 #   YM_LAN_HOST      e.g. 10.116.2.145               added to dsh's --trusted-host
+#   YM_LAN_HOSTNAME  e.g. framework                   a DNS/mDNS hostname, if you browse by
+#                                                    name instead of IP — also added to
+#                                                    --trusted-host (dsh's Host/Origin fence
+#                                                    checks the literal authority you typed;
+#                                                    without this, "http://framework:3080"
+#                                                    loads the page but the agent UI shows
+#                                                    "Disconnected", 403 on every /api call)
 #   YM_HARNESS_DEFAULT_MODEL deepseek-r1:32b (default)  Harness default model (fallback for
 #                                                    [harness].default_model in yardmaster.toml)
 #   YM_AUTH_USER / YM_AUTH_PASS                      pre-seed the admin login; if unset,
@@ -144,7 +151,7 @@ services:
       DSH_HOME: /dshhome
       YM_HARNESS_PORT: "3080"
       YM_HARNESS_PROXY_PORT: "3081"
-      YM_HARNESS_TRUSTED_HOSTS: "127.0.0.1:3080 ${YM_LAN_HOST:-}:3080"
+      YM_HARNESS_TRUSTED_HOSTS: "127.0.0.1:3080${YM_LAN_HOST:+ ${YM_LAN_HOST}:3080}${YM_LAN_HOSTNAME:+ ${YM_LAN_HOSTNAME}:3080}"
       # No model config here — the `yardmaster` container's capability
       # registry (ADR-0028) writes the Harness's model list directly into this
       # volume. Set the default via [harness].default_model in yardmaster.toml,
