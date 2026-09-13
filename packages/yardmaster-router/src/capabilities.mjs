@@ -28,6 +28,31 @@ import { providerEndpoint } from "./router.mjs";
 export const REGION_BEGIN = "# BEGIN yardmaster-managed  (do not edit; managed by the capability pipeline — ADR-0028)";
 export const REGION_END = "# END yardmaster-managed";
 
+// The pre-ADR-0028 harness-entrypoint.sh regenerated the whole models block
+// behind this marker every boot (no END marker of its own — the file *was*
+// the fossil). A deployment upgraded straight from that era still has this
+// sitting ahead of wherever the new region belongs; keep the exact string in
+// sync with the historical `MARKER` harness-entrypoint.sh used to write.
+const LEGACY_ENTRYPOINT_MARKER = "# managed by yardmaster-harness-entrypoint";
+// harness-entrypoint.sh's own USER_MARK — kept in sync by hand, same as above.
+const USER_OVERLAY_MARK = "# --- appended from cordis.user.yml (user-owned) ---";
+
+/**
+ * Strip a pre-ADR-0028 fossil block, if one is sitting in `text`. It predates
+ * entry-level ownership entirely — the whole file *was* generated output back
+ * then — so like dsh's bare `[]` scaffold it is pipeline-owned and safe to
+ * discard outright, never real user content. Bounded by whichever known
+ * marker comes first after it (a cordis.user.yml append, this module's own
+ * region) or end of file, since the legacy format had no closing marker.
+ */
+function stripLegacyFossil(text) {
+  const li = text.indexOf(LEGACY_ENTRYPOINT_MARKER);
+  if (li === -1) return text;
+  const boundaries = [text.indexOf(USER_OVERLAY_MARK, li), text.indexOf(REGION_BEGIN, li)].filter((i) => i !== -1);
+  const end = boundaries.length ? Math.min(...boundaries) : text.length;
+  return text.slice(0, li) + text.slice(end);
+}
+
 // ---------------------------------------------------------------------------
 // Config surface: [harness], [harness.policy], [harness.overrides.<id>]
 // ---------------------------------------------------------------------------
@@ -435,6 +460,7 @@ export async function writeManagedRegion({ patchPath, entries, defaultId, upstre
   } catch {
     /* first write ever */
   }
+  existing = stripLegacyFossil(existing);
   const split = splitRegion(existing);
   let before;
   if (split) {

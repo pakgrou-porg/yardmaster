@@ -344,6 +344,87 @@ test("writeManagedRegion: a bare dsh boilerplate '[]' never survives as an inval
   assert.match(text2, /^- id: my-plugin/);
 });
 
+test("writeManagedRegion: a pre-ADR-0028 harness-entrypoint.sh fossil is stripped, not preserved as a prefix", async (t) => {
+  // Reproduces a real deployment upgraded from before Phase 1: the old
+  // entrypoint's whole-file-every-boot output (no END marker of its own) was
+  // still sitting ahead of the user's cordis.user.yml append when the new
+  // pipeline wrote its first region next to it. dsh resolves the duplicate
+  // `id: llm-pi-ai` last-write-wins, so nothing was ever *broken* — but the
+  // fossil should not persist forever as if it were real user content.
+  const dir = mkdtempSync(join(tmpdir(), "ymcap-"));
+  const patchPath = join(dir, "cordis.patch.yml");
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  const fossil =
+    "# managed by yardmaster-harness-entrypoint — delete this line to keep your own edits\n" +
+    "- id: llm-pi-ai\n" +
+    "  config:\n" +
+    "    providers:\n" +
+    "      yardmaster:\n" +
+    "        models:\n" +
+    "          - id: stale-model\n" +
+    "- id: agent-default-model\n" +
+    "  config:\n" +
+    "    provider: yardmaster\n" +
+    "    model: stale-model\n";
+  const userOverlay = "# --- appended from cordis.user.yml (user-owned) ---\n- id: mcp-brave\n  disabled: false\n";
+
+  // Case 1: fossil + user overlay, no region yet (the very first Phase 1 write).
+  writeFileSync(patchPath, fossil + userOverlay);
+  await writeManagedRegion({
+    patchPath,
+    entries: [{ id: "m1" }],
+    defaultId: "m1",
+    upstream: "http://127.0.0.1:4000/v1",
+    validate: async () => ({ ok: true }),
+  });
+  let text = readFileSync(patchPath, "utf8");
+  assert.doesNotMatch(text, /managed by yardmaster-harness-entrypoint/);
+  assert.doesNotMatch(text, /stale-model/);
+  assert.match(text, /^# --- appended from cordis\.user\.yml/);
+  assert.match(text, /mcp-brave/);
+  assert.match(text, /# BEGIN yardmaster-managed/);
+
+  // Case 2: the exact bug hit in production — fossil + user overlay + a
+  // region that *already exists* from an earlier (unfixed) write. A later
+  // reconcile must still clean the fossil out of `before`, not just leave it
+  // preserved forever because a marker now exists.
+  const dir2 = mkdtempSync(join(tmpdir(), "ymcap-"));
+  const patchPath2 = join(dir2, "cordis.patch.yml");
+  t.after(() => rmSync(dir2, { recursive: true, force: true }));
+  const staleRegion = renderRegion([{ id: "old-entry" }], "old-entry", "http://127.0.0.1:4000/v1");
+  writeFileSync(patchPath2, fossil + userOverlay + staleRegion);
+  await writeManagedRegion({
+    patchPath: patchPath2,
+    entries: [{ id: "m1" }],
+    defaultId: "m1",
+    upstream: "http://127.0.0.1:4000/v1",
+    validate: async () => ({ ok: true }),
+  });
+  const text2 = readFileSync(patchPath2, "utf8");
+  assert.doesNotMatch(text2, /managed by yardmaster-harness-entrypoint/);
+  assert.doesNotMatch(text2, /stale-model/);
+  assert.doesNotMatch(text2, /old-entry/);
+  assert.match(text2, /mcp-brave/);
+  assert.match(text2, /- id: "m1"/);
+
+  // Case 3: fossil with no user overlay at all (fossil is the whole file).
+  const dir3 = mkdtempSync(join(tmpdir(), "ymcap-"));
+  const patchPath3 = join(dir3, "cordis.patch.yml");
+  t.after(() => rmSync(dir3, { recursive: true, force: true }));
+  writeFileSync(patchPath3, fossil);
+  await writeManagedRegion({
+    patchPath: patchPath3,
+    entries: [{ id: "m1" }],
+    defaultId: "m1",
+    upstream: "http://127.0.0.1:4000/v1",
+    validate: async () => ({ ok: true }),
+  });
+  const text3 = readFileSync(patchPath3, "utf8");
+  assert.doesNotMatch(text3, /managed by yardmaster-harness-entrypoint/);
+  assert.match(text3, /^# BEGIN yardmaster-managed/);
+});
+
 test("writeManagedRegion: gated write self-heals from .lkg on a rejected validation", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "ymcap-"));
   const patchPath = join(dir, "cordis.patch.yml");
