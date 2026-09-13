@@ -136,6 +136,8 @@ default_model = "local-model"
 deny_glob = ["*:free"]
 min_context_window = 4096
 rank_by_locality = { cluster = 0, lan = 10, remote = 20 }
+smoke_test = true
+smoke_test_interval_s = 1800
 [harness.overrides."local-model"]
 enabled = true
 rank = 1
@@ -178,6 +180,18 @@ tools = "yes"
   hasErr(r, "harness.overrides.\"x\".enabled` must be a boolean");
   hasErr(r, "harness.overrides.\"x\".rank` must be a number");
   hasErr(r, "harness.overrides.\"x\".context_window` must be a positive integer");
+});
+
+test("[harness]: smoke_test policy keys are type-checked", () => {
+  const r = validateConfig(`
+schema_version = 1
+[targets]
+[harness.policy]
+smoke_test = "yes"
+smoke_test_interval_s = 0
+`);
+  hasErr(r, "`harness.policy.smoke_test` must be a boolean");
+  hasErr(r, "`harness.policy.smoke_test_interval_s` must be a positive integer");
 });
 
 test("[harness]: more than one override with default = true is a warning, not an error", () => {

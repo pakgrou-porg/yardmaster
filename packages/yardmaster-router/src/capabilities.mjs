@@ -103,6 +103,13 @@ export function discover(config) {
       family: null,
       reachability: "discovered",
       reachability_checked_ms: null,
+      // Set only by the opt-in smoke test (stage 3b, off by default — see
+      // smokeTestCapabilities): a real chat-completions POST, not just a
+      // model-list probe. smoke_test_checked_ms gates the retry interval
+      // (an attempt, success or failure); smoke_test_error is the last
+      // failure reason, cleared on the next success.
+      smoke_test_checked_ms: null,
+      smoke_test_error: null,
       policy: "enabled",
       policy_reason: null,
       rank: null,
@@ -154,6 +161,8 @@ export function applyProbeResults(records, probeMap) {
         family: null,
         reachability: "validated",
         reachability_checked_ms: p.checkedMs,
+        smoke_test_checked_ms: null,
+        smoke_test_error: null,
         policy: "disabled",
         policy_reason: "not declared as a target",
         rank: null,
@@ -265,7 +274,7 @@ export function selectDefault(records, config, harnessCfg) {
 
 export function desiredEntries(records) {
   return [...records.values()]
-    .filter((r) => r.target && r.policy === "enabled" && r.reachability === "validated")
+    .filter((r) => r.target && r.policy === "enabled" && (r.reachability === "validated" || r.reachability === "smoke_tested"))
     .sort((a, b) => a.rank - b.rank || a.id.localeCompare(b.id))
     .map((r) => ({ id: r.id, contextWindow: Number.isFinite(r.context_window) ? r.context_window : undefined }));
 }
@@ -443,6 +452,93 @@ export async function probeCapabilitySources(config, { timeoutMs = 4000 } = {}) 
     }),
   );
   return results;
+}
+
+/** One minimal chat-completions POST — the actual real-money request a smoke
+ * test makes. `max_tokens: 1` keeps the cost negligible on paid providers. */
+async function smokeTestOne(providerEp, modelId, timeoutMs) {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    const headers = { "content-type": "application/json" };
+    if (providerEp.apiKey) headers.authorization = `Bearer ${providerEp.apiKey}`;
+    const body = JSON.stringify({ model: modelId, messages: [{ role: "user", content: "hi" }], max_tokens: 1, stream: false });
+    const r = await fetch(providerEp.chatUrl, { method: "POST", headers, body, signal: ac.signal });
+    clearTimeout(timer);
+    if (r.ok) return { ok: true };
+    const text = await r.text().catch(() => "");
+    return { ok: false, error: `HTTP ${r.status}: ${text.replace(/\s+/g, " ").slice(0, 200)}` };
+  } catch (e) {
+    clearTimeout(timer);
+    return { ok: false, error: e.name === "AbortError" ? `timeout after ${timeoutMs}ms` : String(e.message || e) };
+  }
+}
+
+/**
+ * Opt-in smoke test (ADR-0028 P3): upgrades `reachability` from "validated"
+ * (the id appeared in the provider's `/v1/models` list) to "smoke_tested" (a
+ * real chat-completions request against that id actually succeeded) —
+ * strictly additive confidence, never a gate on what's applied to dsh
+ * (`desiredEntries` already accepts either). **Off by default**
+ * (`[harness.policy] smoke_test = true` to enable) because it spends real
+ * money on paid providers; rate-limited by `smoke_test_interval_s` (default
+ * 1h) so it doesn't fire on every reconcile.
+ *
+ * `state` is a `Map<id, {lastAttemptMs: number|null, lastSuccessMs, lastError}>`
+ * (`lastAttemptMs: null` means "never attempted" — always due) the
+ * caller owns and passes back in on every call — this is the one stage in
+ * the pipeline with cross-reconcile memory, since `discover()` rebuilds
+ * fresh records every cycle and has no other way to know "already tested
+ * recently" without re-spending on every single reconcile.
+ */
+export async function smokeTestCapabilities(records, config, harnessCfg, { timeoutMs = 8000, now = Date.now(), state } = {}) {
+  const policy = harnessCfg.policy || {};
+  if (policy.smoke_test !== true) return records;
+  const intervalMs = Number.isFinite(policy.smoke_test_interval_s) ? policy.smoke_test_interval_s * 1000 : 3_600_000;
+  const eligible = (r) => r.target && r.policy === "enabled" && (r.reachability === "validated" || r.reachability === "smoke_tested");
+
+  const jobs = [];
+  for (const rec of records.values()) {
+    if (!eligible(rec)) continue;
+    const st = state.get(rec.id) ?? { lastAttemptMs: null, lastSuccessMs: null, lastError: null };
+    state.set(rec.id, st);
+    // Never attempted -> always due, regardless of `now`'s magnitude (don't
+    // rely on `now` already being larger than one interval, even though a
+    // real Date.now() always is).
+    if (st.lastAttemptMs != null && now - st.lastAttemptMs < intervalMs) continue; // not due yet — reuse remembered state below
+    const ep = providerEndpoint(rec.provider, config.providers);
+    if (ep.error) {
+      st.lastAttemptMs = now;
+      st.lastError = ep.error;
+      continue;
+    }
+    jobs.push(
+      smokeTestOne(ep, rec.id, timeoutMs).then((res) => {
+        st.lastAttemptMs = now;
+        if (res.ok) {
+          st.lastSuccessMs = now;
+          st.lastError = null;
+        } else {
+          st.lastError = res.error;
+        }
+      }),
+    );
+  }
+  await Promise.all(jobs);
+
+  for (const rec of records.values()) {
+    if (!eligible(rec)) continue;
+    const st = state.get(rec.id);
+    if (!st) continue;
+    rec.smoke_test_checked_ms = st.lastAttemptMs ?? null;
+    if (st.lastError === null && st.lastSuccessMs != null) {
+      rec.reachability = "smoke_tested";
+      rec.smoke_test_error = null;
+    } else {
+      rec.smoke_test_error = st.lastError;
+    }
+  }
+  return records;
 }
 
 /**

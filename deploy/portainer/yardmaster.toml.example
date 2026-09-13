@@ -137,6 +137,11 @@ target = "local_r1_32b"
 # deny_glob = ["*:free", "*-preview*"]  # never offer these ids to the agent
 # min_context_window = 4096             # hide anything smaller (when known)
 # rank_by_locality = { cluster = 0, lan = 10, remote = 20 }   # preference order
+# smoke_test = false                    # opt-in (ADR-0028 P3): a real chat-completions
+#                                        # POST per candidate model, not just a /v1/models
+#                                        # listing check — costs real money on paid
+#                                        # providers, so it's off unless you turn it on.
+# smoke_test_interval_s = 3600          # re-test at most this often per model
 #
 # [harness.overrides."qwen/qwen3.8-flash"]
 # enabled = true                        # wins over policy.deny_glob for this id

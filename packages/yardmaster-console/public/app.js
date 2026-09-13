@@ -80,7 +80,9 @@ beTimer = setInterval(refreshBackends, 15000);
 
 // ---- capabilities (ADR-0028) ----
 function reachPill(r) {
-  const cls = r === "validated" ? "up" : r === "unreachable" ? "down" : "warn";
+  // smoke_tested is *stronger* confidence than validated (a real chat
+  // completion succeeded, not just a /v1/models listing) — same color.
+  const cls = r === "validated" || r === "smoke_tested" ? "up" : r === "unreachable" ? "down" : "warn";
   return `<span class="pill ${cls}">${esc(r)}</span>`;
 }
 function policyPill(p, reason) {

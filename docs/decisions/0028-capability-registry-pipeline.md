@@ -177,8 +177,10 @@ profile scaffold exists and tolerates an absent region on first boot.
 - Deterministic, inspectable (`/v1/capabilities`, the plan), reconciling.
 - Entry-level ownership; user patch entries and managed entries coexist.
 - Rollback to last-known-good on a bad apply instead of a crash loop.
-- Metadata (`context_window`, capability flags, pricing) flows to dsh and can
-  later feed `/v1/models` and routing hints.
+- Metadata (`context_window`, capability flags, pricing) flows to dsh and (P3)
+  is projected onto the router's own `/v1/models` and a response header, so
+  any OpenAI-compatible client gets the same enabled/reachable set and hints
+  dsh does, not just the Harness.
 - New `[harness.overrides]` / `[harness.policy]` config surface — the validator
   must learn them (`[harness]` is already an allowed top-level key).
 - Still interim. When the Rust data plane (#36) lands it either absorbs this
@@ -230,4 +232,28 @@ profile scaffold exists and tolerates an absent region on first boot.
   either is a UI-only follow-up, not a new write path.
 - **P3** — opt-in smoke-test validation; pricing/cost normalization; project the
   enabled set onto the router's `/v1/models`; per-model capability hints on
-  responses.
+  responses. **Done**:
+  - `smokeTestCapabilities()` (`capabilities.mjs`) — a real chat-completions
+    POST per candidate model, upgrading `reachability` from `validated` to
+    `smoke_tested` on success (strictly additive confidence, never a gate on
+    what's applied to dsh). Off by default
+    (`[harness.policy] smoke_test = true` to enable — it spends real money on
+    paid providers), rate-limited by `smoke_test_interval_s` (default 1h)
+    against a `Map<id, {lastAttemptMs, lastSuccessMs, lastError}>` the router
+    keeps across reconciles (the only stage in the pipeline with
+    cross-reconcile memory — `discover()` rebuilds fresh records every
+    cycle). A failure never downgrades an already-`validated` id; it's
+    surfaced as `smoke_test_error` for visibility in `/v1/capabilities`.
+  - `GET /v1/models` and `/api/tags` now project the registry's *applied*
+    set (enabled + reachable, rank order — the same list dsh sees) instead
+    of every declared target regardless of reachability, with
+    `context_window` / `capabilities.*` / `pricing_usd_per_mtok` / `default`
+    per entry. Falls back to the raw declared-target list in the brief
+    window before the first reconcile has run.
+  - `POST /v1/chat/completions` responses carry an
+    `x-yardmaster-context-window` header when the resolved model's is known
+    — a capability hint without a second call to `/v1/capabilities`.
+  - Pricing normalization was already handled in P1
+    (`probeCapabilitySources`'s OpenRouter-style `pricing.prompt`/
+    `completion` × 1e6 → USD/Mtok); P3 just started surfacing it on
+    `/v1/models` too rather than only `/v1/capabilities`.

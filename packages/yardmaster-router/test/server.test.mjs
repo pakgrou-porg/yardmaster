@@ -259,3 +259,66 @@ target = "big"
   assert.match(patch, /id: "deepseek-r1:32b"/);
   assert.match(patch, /model: "deepseek-r1:32b"/);
 });
+
+test("router: /v1/models and /api/tags project the capability registry's applied set (ADR-0028 P3)", async (t) => {
+  // The stub only advertises two of these three declared ids — the third
+  // stays "unreachable" and must not appear, unlike the old behavior (every
+  // declared target regardless of reachability/policy).
+  const engine = startStub(19603, "llama3.2:latest,deepseek-r1:32b", "engine-proj");
+  const dir = mkdtempSync(join(tmpdir(), "ymr-proj-"));
+  const cfgPath = join(dir, "yardmaster.toml");
+  writeFileSync(
+    cfgPath,
+    `schema_version = 1
+[providers.local]
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:19603"
+[targets]
+[targets.small]
+id = "llama3.2:latest"
+locality = "lan"
+provider = "local"
+[targets.big]
+id = "deepseek-r1:32b"
+locality = "lan"
+provider = "local"
+context_window = 32768
+[targets.ghost]
+id = "never-actually-served"
+locality = "lan"
+provider = "local"
+[routes.default]
+id = "auto"
+type = "passthrough"
+target = "big"
+`,
+  );
+  const srv = spawn(process.execPath, [fileURLToPath(new URL("../src/server.mjs", import.meta.url))], {
+    env: {
+      ...process.env,
+      YM_ROUTER_PORT: "19602",
+      YM_ROUTER_CONFIG: cfgPath,
+      YM_METRICS_DB: join(dir, "m.db"),
+      YM_CAPABILITIES_RECONCILE_S: "3600",
+    },
+    stdio: "ignore",
+  });
+  t.after(() => {
+    engine.kill();
+    srv.kill();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  await wait(1500);
+
+  const models = await (await fetch("http://127.0.0.1:19602/v1/models")).json();
+  const ids = models.data.map((m) => m.id).sort();
+  assert.deepEqual(ids, ["deepseek-r1:32b", "llama3.2:latest"], "the unreachable declared target is excluded");
+  const big = models.data.find((m) => m.id === "deepseek-r1:32b");
+  assert.equal(big.context_window, 32768, "capability hint from the declared [targets.big].context_window");
+  assert.equal(big.default, true, "routes.default.target");
+  const small = models.data.find((m) => m.id === "llama3.2:latest");
+  assert.equal(small.default, false);
+
+  const tags = await (await fetch("http://127.0.0.1:19602/api/tags")).json();
+  assert.deepEqual(tags.models.map((m) => m.name).sort(), ["deepseek-r1:32b", "llama3.2:latest"]);
+});

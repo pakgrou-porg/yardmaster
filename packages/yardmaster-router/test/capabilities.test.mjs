@@ -21,6 +21,7 @@ import {
   planApply,
   runPipeline,
   probeCapabilitySources,
+  smokeTestCapabilities,
   writeManagedRegion,
 } from "../src/capabilities.mjs";
 
@@ -305,6 +306,104 @@ provider = "p"
   assert.ok(Math.abs(p.models.get("vendor/model-a").pricing.in - 3) < 1e-6);
   assert.ok(Math.abs(p.models.get("vendor/model-a").pricing.out - 15) < 1e-6);
   assert.equal(p.models.get("vendor/model-b").context_length, null);
+});
+
+test("smokeTestCapabilities: off by default — no network calls, records untouched", async () => {
+  const config = parseConfig(CFG);
+  let records = applyProbeResults(discover(config), baseProbeMap());
+  records = applyPolicy(records, parseHarnessConfig(config));
+  const before = JSON.parse(JSON.stringify([...records.values()]));
+  // No stub server at all — if this made a request it would fail/hang.
+  await smokeTestCapabilities(records, config, parseHarnessConfig(config), { state: new Map() });
+  assert.deepEqual([...records.values()], before);
+});
+
+test("smokeTestCapabilities: a successful POST upgrades reachability; a failure leaves it validated with an error", async (t) => {
+  const calls = [];
+  let badModelCalls = 0;
+  const srv = createServer(async (req, res) => {
+    const chunks = [];
+    for await (const c of req) chunks.push(c);
+    const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    calls.push(body.model);
+    // llama3.2 always succeeds; deepseek-r1:32b fails the first time (still
+    // validated, just not smoke_tested yet) and succeeds on retry, to
+    // exercise both a downgrade-free failure and a later recovery.
+    if (body.model === "llama3.2:latest" || (body.model === "deepseek-r1:32b" && ++badModelCalls > 1)) {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ choices: [{ message: { content: "hi" } }] }));
+    } else {
+      res.writeHead(503, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "overloaded" }));
+    }
+  });
+  await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+  const port = srv.address().port;
+  t.after(() => srv.close());
+
+  const config = parseConfig(`
+schema_version = 1
+[providers.local]
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:${port}"
+[targets]
+[targets.small]
+id = "llama3.2:latest"
+locality = "lan"
+provider = "local"
+[targets.big]
+id = "deepseek-r1:32b"
+locality = "lan"
+provider = "local"
+[harness.policy]
+smoke_test = true
+`);
+  const probeMap = new Map([
+    [
+      "local",
+      {
+        ok: true,
+        checkedMs: 1000,
+        models: new Map([
+          ["llama3.2:latest", { context_length: 8192, pricing: null }],
+          ["deepseek-r1:32b", { context_length: 32768, pricing: null }],
+        ]),
+      },
+    ],
+  ]);
+  let records = applyProbeResults(discover(config), probeMap);
+  records = applyPolicy(records, parseHarnessConfig(config));
+
+  // A fresh id has never been attempted (lastAttemptMs defaults to 0), and
+  // "due" is `now - lastAttemptMs >= interval` — so `now` has to already be
+  // past one interval for a brand-new id's very first test to fire, exactly
+  // as any real Date.now() (~1.8e12 today) always is relative to an hour.
+  const START = 10_000_000_000;
+  const intervalMs = 3_600_000;
+  const state = new Map();
+  await smokeTestCapabilities(records, config, parseHarnessConfig(config), { state, now: START });
+
+  assert.deepEqual(calls.sort(), ["deepseek-r1:32b", "llama3.2:latest"]);
+  const ok = records.get("llama3.2:latest");
+  assert.equal(ok.reachability, "smoke_tested");
+  assert.equal(ok.smoke_test_error, null);
+  assert.equal(ok.smoke_test_checked_ms, START);
+  const bad = records.get("deepseek-r1:32b");
+  assert.equal(bad.reachability, "validated", "a smoke-test failure never downgrades — the /v1/models probe already succeeded");
+  assert.match(bad.smoke_test_error, /HTTP 503/);
+
+  // Immediately due again check: within the interval, no new requests fire —
+  // remembered state alone re-stamps the records.
+  const callsBefore = calls.length;
+  await smokeTestCapabilities(records, config, parseHarnessConfig(config), { state, now: START + 1 });
+  assert.equal(calls.length, callsBefore, "not due yet — no new request");
+  assert.equal(records.get("llama3.2:latest").reachability, "smoke_tested", "remembered success still applied");
+
+  // Past the interval: retests. The bad one succeeds this time.
+  await smokeTestCapabilities(records, config, parseHarnessConfig(config), { state, now: START + intervalMs });
+  assert.equal(calls.length, callsBefore + 2, "interval elapsed — both retested");
+  assert.equal(records.get("deepseek-r1:32b").reachability, "smoke_tested", "a later success clears the earlier error");
+  assert.equal(records.get("deepseek-r1:32b").smoke_test_error, null);
 });
 
 test("writeManagedRegion: a bare dsh boilerplate '[]' never survives as an invalid-YAML prefix", async (t) => {

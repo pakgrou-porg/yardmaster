@@ -335,14 +335,26 @@ longer generates any of this; it only scaffolds the dsh profile on first boot.
   example in
   [`yardmaster.toml.example`](../deploy/portainer/yardmaster.toml.example).
   An override always wins over policy for that id.
-- **Inspect the live registry**: `GET /v1/capabilities` on the router
-  (`:11435` or `:4000` inside the container) — every discovered model with its
-  `reachability`/`policy`/`rank`, the currently-applied list and default, and
-  any `pending_ops` awaiting approval (destructive changes — removals not
-  caused by an override, or default changes not caused by explicit config —
-  are held, not auto-applied; see ADR-0028). Approve **all** held ops at once
-  with `POST /v1/capabilities/apply` (no per-op selection yet — that's a
-  planned Console "Capabilities" tab, not built).
+- **Inspect the live registry**: the Console's **Capabilities** tab, or
+  `GET /v1/capabilities` on the router directly (`:11435` or `:4000` inside
+  the container) — every discovered model with its `reachability`/`policy`/
+  `rank`, the currently-applied list and default, and any `pending_ops`
+  awaiting approval (destructive changes — removals not caused by an
+  override, or default changes not caused by explicit config — are held, not
+  auto-applied; see ADR-0028). Approve **all** held ops at once with the
+  tab's "Apply all", or `POST /v1/capabilities/apply` directly (still
+  all-or-nothing — no per-op selection).
+- **`GET /v1/models` and `/api/tags`** (ADR-0028 P3) project this same
+  applied set — enabled + reachable, rank order — with `context_window` /
+  `capabilities.*` / `pricing_usd_per_mtok` / `default` per entry, instead of
+  every declared target regardless of reachability. Chat-completion responses
+  also carry an `x-yardmaster-context-window` header when known.
+- **Opt-in smoke test** (`[harness.policy] smoke_test = true`): upgrades
+  `reachability` from `validated` (appeared in a `/v1/models` probe) to
+  `smoke_tested` (an actual chat-completions request succeeded) — stronger
+  confidence, never a gate on what's applied. Off by default because it
+  spends real money on paid providers; rate-limited by
+  `smoke_test_interval_s` (default 1h) once enabled.
 - **Before approving a removal**, check nothing's mid-turn on the model being
   dropped — dsh doesn't interrupt an in-flight request just because its model
   left the config, but starting a *new* turn on a since-removed id will fail

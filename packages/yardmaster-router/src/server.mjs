@@ -9,9 +9,12 @@
  *
  * Endpoints:
  *   GET  /healthz
- *   GET  /v1/models                 every routable model id
+ *   GET  /v1/models                 the capability registry's *applied* set
+ *                                    (ADR-0028 P3): enabled + reachable, rank
+ *                                    order, with context_window/capabilities/
+ *                                    pricing hints per model
  *   POST /v1/chat/completions       OpenAI Chat Completions (stream + non-stream)
- *   GET  /api/tags                  Ollama-style model list
+ *   GET  /api/tags                  Ollama-style model list (same set as above)
  *   POST /api/chat                  Ollama chat (translated to/from OpenAI)
  *   GET  /v1/capabilities           the capability registry (ADR-0028 P1)
  *   POST /v1/capabilities/reconcile run the pipeline now
@@ -29,7 +32,10 @@
  *   `--dump-config` gate before every write), YM_HARNESS_UPSTREAM (derived
  *   from YM_ROUTER_PORT), YM_HARNESS_DEFAULT_MODEL (fallback for
  *   [harness].default_model), YM_CAPABILITIES_RECONCILE_S (60),
- *   YM_CAPABILITIES_PROBE_TIMEOUT_MS (4000).
+ *   YM_CAPABILITIES_PROBE_TIMEOUT_MS (4000),
+ *   YM_CAPABILITIES_SMOKE_TEST_TIMEOUT_MS (8000, only used when
+ *   [harness.policy] smoke_test = true — off by default; see
+ *   capabilities.mjs#smokeTestCapabilities).
  */
 
 import { createServer } from "node:http";
@@ -40,6 +46,7 @@ import { openMetrics } from "./metrics.mjs";
 import {
   parseHarnessConfig,
   probeCapabilitySources,
+  smokeTestCapabilities,
   runPipeline,
   writeManagedRegion,
   makeDshValidator,
@@ -70,6 +77,9 @@ const capCfg = {
   upstream: process.env.YM_HARNESS_UPSTREAM || `http://127.0.0.1:${Number(process.env.YM_ROUTER_PORT || 4000)}/v1`,
   reconcileIntervalMs: Number(process.env.YM_CAPABILITIES_RECONCILE_S || 60) * 1000,
   probeTimeoutMs: Number(process.env.YM_CAPABILITIES_PROBE_TIMEOUT_MS || 4000),
+  // Opt-in only ([harness.policy] smoke_test = true) — a real chat-completions
+  // POST per candidate model, so a longer timeout than the /v1/models probe.
+  smokeTestTimeoutMs: Number(process.env.YM_CAPABILITIES_SMOKE_TEST_TIMEOUT_MS || 8000),
 };
 capCfg.patchPath = `${capCfg.dshHome}/profiles/web/cordis.patch.yml`;
 
@@ -102,6 +112,12 @@ let previousApplied = existsSync(capCfg.patchPath) ? parseAppliedRegion(readFile
 const dshValidator = makeDshValidator({ dshBin: existsSync(capCfg.dshBin) ? capCfg.dshBin : null, dshHome: capCfg.dshHome });
 let reconcileTimer = null;
 let reconciling = false;
+// Smoke-test attempt/result memory, keyed by model id — survives across
+// reconciles (discover() rebuilds fresh records every cycle) so the
+// interval gate in smokeTestCapabilities actually rate-limits real spend
+// instead of re-testing on every reconcile. Empty/no-op unless
+// [harness.policy] smoke_test = true.
+const smokeTestState = new Map();
 
 function loadConfig(force = false) {
   const p = activePath();
@@ -148,6 +164,11 @@ async function reconcileNow() {
     }
     const probeMap = await probeCapabilitySources(config, { timeoutMs: capCfg.probeTimeoutMs });
     const { records, desired, plan } = runPipeline(config, probeMap, harnessCfg, previousApplied);
+    // Opt-in (off by default) — enriches `records` in place for the
+    // /v1/capabilities snapshot; never gates what's applied to dsh (`desired`/
+    // `plan` above are already final by this point, computed from
+    // reachability "validated", which smoke_tested only ever upgrades from).
+    await smokeTestCapabilities(records, config, harnessCfg, { timeoutMs: capCfg.smokeTestTimeoutMs, state: smokeTestState });
     registry = { records, desired, plan, lastReconcileMs: Date.now(), lastError: null };
 
     if (!existsSync(capCfg.dshHome)) return; // no Harness volume mounted here — registry still computed, nothing to write
@@ -202,6 +223,34 @@ async function forceApplyPending() {
     registry.plan = { appliedEntries: registry.desired.entries, appliedDefaultId: registry.desired.defaultId, pendingOps: [] };
   }
   return result;
+}
+
+/**
+ * /v1/models + /api/tags (ADR-0028 P3): project the capability registry's
+ * *applied* set — enabled, reachable, in rank order, the same list dsh
+ * sees — rather than every declared target regardless of reachability, with
+ * per-model capability hints (context window, tool/vision/reasoning flags,
+ * pricing) an OpenAI client can read without a second call to
+ * /v1/capabilities. Falls back to the raw declared-target list before the
+ * registry has run its first reconcile (a brief window right after boot).
+ */
+function capabilityModelList() {
+  if (registry.plan.appliedEntries.length === 0) {
+    return knownModels(config).map((id) => ({ id, object: "model", owned_by: "yardmaster" }));
+  }
+  return registry.plan.appliedEntries.map((e) => {
+    const rec = registry.records.get(e.id);
+    return {
+      id: e.id,
+      object: "model",
+      owned_by: "yardmaster",
+      context_window: rec?.context_window ?? e.contextWindow ?? null,
+      capabilities: rec?.capabilities ?? { tools: null, vision: null, reasoning: null },
+      pricing_usd_per_mtok: rec?.pricing_usd_per_mtok ?? null,
+      locality: rec?.locality ?? null,
+      default: e.id === registry.plan.appliedDefaultId,
+    };
+  });
 }
 
 // --- helpers ------------------------------------------------------------
@@ -400,6 +449,11 @@ async function handleChat(req, res, { ingress }) {
   };
   const servedBy = upstream.headers.get("x-served-by");
   if (servedBy) outHeaders["x-served-by"] = servedBy;
+  // Capability hint (ADR-0028 P3), if the registry has this id: lets a caller
+  // that isn't parsing /v1/models learn the context window from the response
+  // it's already looking at.
+  const capRec = registry.records.get(hop.model);
+  if (Number.isFinite(capRec?.context_window)) outHeaders["x-yardmaster-context-window"] = String(capRec.context_window);
   res.writeHead(upstream.status, outHeaders);
 
   if (!upstream.body) {
@@ -560,14 +614,11 @@ const server = createServer(async (req, res) => {
       return json(res, result.applied || result.unchanged ? 200 : 502, result);
     }
     if (p === "/v1/models" && req.method === "GET") {
-      return json(res, 200, {
-        object: "list",
-        data: knownModels(config).map((id) => ({ id, object: "model", owned_by: "yardmaster" })),
-      });
+      return json(res, 200, { object: "list", data: capabilityModelList() });
     }
     if (p === "/api/tags" && req.method === "GET") {
       return json(res, 200, {
-        models: knownModels(config).map((name) => ({ name, model: name, size: 0, digest: "", details: {} })),
+        models: capabilityModelList().map((m) => ({ name: m.id, model: m.id, size: 0, digest: "", details: {} })),
       });
     }
     if (p === "/v1/chat/completions" && req.method === "POST") {

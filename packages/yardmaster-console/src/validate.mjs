@@ -36,7 +36,7 @@ const TARGET_KEYS = new Set([
 ]);
 // [harness] — the DeepSeek Harness capability registry (ADR-0028).
 const HARNESS_KEYS = new Set(["default_model", "policy", "overrides"]);
-const HARNESS_POLICY_KEYS = new Set(["deny_glob", "min_context_window", "rank_by_locality"]);
+const HARNESS_POLICY_KEYS = new Set(["deny_glob", "min_context_window", "rank_by_locality", "smoke_test", "smoke_test_interval_s"]);
 const HARNESS_OVERRIDE_KEYS = new Set(["enabled", "rank", "context_window", "capabilities", "default"]);
 const HARNESS_CAPABILITY_FLAGS = new Set(["tools", "vision", "reasoning"]);
 const LOCALITIES_FOR_RANK = new Set(["cluster", "lan", "remote"]);
@@ -235,6 +235,12 @@ export function validateConfig(rawText) {
           else if (typeof v !== "number") errors.push(`\`harness.policy.rank_by_locality.${k}\` must be a number`);
         }
       }
+    }
+    if (policy.smoke_test !== undefined && typeof policy.smoke_test !== "boolean") {
+      errors.push("`harness.policy.smoke_test` must be a boolean");
+    }
+    if (policy.smoke_test_interval_s !== undefined && !(Number.isInteger(policy.smoke_test_interval_s) && policy.smoke_test_interval_s > 0)) {
+      errors.push("`harness.policy.smoke_test_interval_s` must be a positive integer");
     }
     const overrides = h.overrides ?? {};
     let defaultOverrides = 0;
