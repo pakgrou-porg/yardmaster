@@ -334,8 +334,36 @@ longer generates any of this; it only scaffolds the dsh profile on first boot.
   `reachability`/`policy`/`rank`, the currently-applied list and default, and
   any `pending_ops` awaiting approval (destructive changes — removals not
   caused by an override, or default changes not caused by explicit config —
-  are held, not auto-applied; see ADR-0028). Approve them with
-  `POST /v1/capabilities/apply`.
+  are held, not auto-applied; see ADR-0028). Approve **all** held ops at once
+  with `POST /v1/capabilities/apply` (no per-op selection yet — that's a
+  planned Console "Capabilities" tab, not built).
+- **Before approving a removal**, check nothing's mid-turn on the model being
+  dropped — dsh doesn't interrupt an in-flight request just because its model
+  left the config, but starting a *new* turn on a since-removed id will fail
+  to resolve. This one-liner needs nothing beyond what's already in the
+  image (no `jq`/`python3` required) and reports any session with an open
+  turn:
+  ```bash
+  docker exec yardmaster-harness node -e '
+  const fs = require("fs");
+  const dir = "/dshhome/storages/session_projcache/sessions";
+  const files = fs.existsSync(dir) ? fs.readdirSync(dir).filter(f => f.endsWith(".json")) : [];
+  let busy = 0;
+  for (const f of files) {
+    let d;
+    try { d = JSON.parse(fs.readFileSync(`${dir}/${f}`, "utf8")); } catch { continue; }
+    const rows = d?.record?.rows || {};
+    const tb = rows.turnBoundary?.val;
+    const ms = rows.modelSelection?.val;
+    if (tb && tb.openTurnStartSeq != null) {
+      busy++;
+      console.log(`BUSY  ${f}  openTurnStartSeq=${tb.openTurnStartSeq}  model=${ms?.lastUsed?.model || "?"}`);
+    }
+  }
+  console.log(busy === 0 ? `idle: 0/${files.length} sessions have an open turn` : `${busy}/${files.length} sessions are mid-turn — do not promote yet`);
+  '
+  ```
+  `idle: 0/N` means it's safe to `POST /v1/capabilities/apply`.
 - Content outside the managed region (including the `cordis.user.yml` merge
   used for MCP servers below) is never touched by the pipeline.
 - `DSH_HOME` is the dedicated `yardmaster-harness` volume, so the signed-cookie
