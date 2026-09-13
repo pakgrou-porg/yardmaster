@@ -454,13 +454,13 @@ export async function probeCapabilitySources(config, { timeoutMs = 4000 } = {}) 
  */
 export async function writeManagedRegion({ patchPath, entries, defaultId, upstream, validate }) {
   const regionText = renderRegion(entries, defaultId, upstream);
-  let existing = "";
+  let rawExisting = "";
   try {
-    existing = await readFile(patchPath, "utf8");
+    rawExisting = await readFile(patchPath, "utf8");
   } catch {
     /* first write ever */
   }
-  existing = stripLegacyFossil(existing);
+  const existing = stripLegacyFossil(rawExisting);
   const split = splitRegion(existing);
   let before;
   if (split) {
@@ -481,7 +481,10 @@ export async function writeManagedRegion({ patchPath, entries, defaultId, upstre
   const after = split ? split.after.replace(/^\n+/, "") : "";
   const newText = before + regionText + after;
 
-  if (newText === existing) return { applied: false, unchanged: true };
+  // Compare against the *raw* on-disk bytes, not the fossil-stripped view:
+  // a write that only removes a legacy fossil (no other diff) must still
+  // land on disk, or the "unchanged" fast path silently leaves it in place.
+  if (newText === rawExisting) return { applied: false, unchanged: true };
 
   const lkgPath = `${patchPath}.lkg`;
   try {

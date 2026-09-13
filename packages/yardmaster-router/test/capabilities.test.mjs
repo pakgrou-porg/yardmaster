@@ -408,6 +408,29 @@ test("writeManagedRegion: a pre-ADR-0028 harness-entrypoint.sh fossil is strippe
   assert.match(text2, /mcp-brave/);
   assert.match(text2, /- id: "m1"/);
 
+  // Case 2b: the specific way the bug first shipped — the fossil sits next
+  // to a region whose entries/default are *already exactly what's desired*
+  // (a no-op reconcile in every other respect). The naive fix compared the
+  // freshly-built text against the fossil-stripped view of what's on disk,
+  // saw no difference, and took the "unchanged" fast path — leaving the
+  // fossil bytes on disk forever, exactly as happened in production.
+  const dir2b = mkdtempSync(join(tmpdir(), "ymcap-"));
+  const patchPath2b = join(dir2b, "cordis.patch.yml");
+  t.after(() => rmSync(dir2b, { recursive: true, force: true }));
+  const matchingRegion = renderRegion([{ id: "m1" }], "m1", "http://127.0.0.1:4000/v1");
+  writeFileSync(patchPath2b, fossil + userOverlay + matchingRegion);
+  const r2b = await writeManagedRegion({
+    patchPath: patchPath2b,
+    entries: [{ id: "m1" }],
+    defaultId: "m1",
+    upstream: "http://127.0.0.1:4000/v1",
+    validate: async () => ({ ok: true }),
+  });
+  assert.equal(r2b.applied, true, "a fossil-only cleanup must still write, not report unchanged");
+  const text2b = readFileSync(patchPath2b, "utf8");
+  assert.doesNotMatch(text2b, /managed by yardmaster-harness-entrypoint/);
+  assert.match(text2b, /mcp-brave/);
+
   // Case 3: fossil with no user overlay at all (fossil is the whole file).
   const dir3 = mkdtempSync(join(tmpdir(), "ymcap-"));
   const patchPath3 = join(dir3, "cordis.patch.yml");
