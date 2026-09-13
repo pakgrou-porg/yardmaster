@@ -67,7 +67,7 @@ hyper = { version = "1", features = ["server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 opentelemetry = "0.27"
 opentelemetry-otlp = { version = "0.27", default-features = false, features = ["grpc-tonic", "trace", "metrics"] }
-opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
+opentelemetry_sdk = { version = "0.32", features = ["rt-tokio"] }
 parking_lot = "0.12"
 prometheus = "0.14" # 0.13 pulls protobuf 2.x (RUSTSEC-2024-0437); 0.14 requires protobuf >=3.7.2
 rand = "0.10"
