@@ -58,5 +58,9 @@ pub enum Personality {
 
 /// Peek the first byte of a stream to choose a personality without consuming it.
 pub fn classify_first_byte(first: u8) -> Personality {
-    if first == 0x16 { Personality::ClusterMtls } else { Personality::Plaintext }
+    if first == 0x16 {
+        Personality::ClusterMtls
+    } else {
+        Personality::Plaintext
+    }
 }

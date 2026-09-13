@@ -5,7 +5,7 @@
 //! every column in the migration is on an explicit allowlist, and no column
 //! name contains a content-capture fragment.
 
-use yardmaster_metrics::schema::{allowlist_for, FORBIDDEN_NAME_FRAGMENTS, MIGRATION_V1};
+use yardmaster_metrics::schema::{FORBIDDEN_NAME_FRAGMENTS, MIGRATION_V1, allowlist_for};
 
 /// Parse `CREATE TABLE <name> ( ... )` blocks out of the migration and return
 /// `(table, column)` pairs. Deliberately simple: the migration is hand-written
@@ -40,7 +40,10 @@ fn columns(sql: &str) -> Vec<(String, String)> {
             first_lower.as_str(),
             "primary" | "foreign" | "unique" | "check" | "constraint" | ");" | ")" | "insert"
         );
-        if !is_constraint && first.chars().all(|c| c.is_ascii_lowercase() || c == '_') && !first.is_empty() {
+        if !is_constraint
+            && first.chars().all(|c| c.is_ascii_lowercase() || c == '_')
+            && !first.is_empty()
+        {
             out.push((t, first.to_string()));
         }
         if depth <= 0 {
@@ -84,7 +87,10 @@ fn allowlists_have_no_forbidden_fragments() {
     for table in ["events", "rollups_hourly", "cost_daily"] {
         for col in allowlist_for(table).unwrap() {
             for bad in FORBIDDEN_NAME_FRAGMENTS {
-                assert!(!col.contains(bad), "allowlist entry `{table}.{col}` hits `{bad}`");
+                assert!(
+                    !col.contains(bad),
+                    "allowlist entry `{table}.{col}` hits `{bad}`"
+                );
             }
         }
     }

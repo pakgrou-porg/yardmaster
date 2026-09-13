@@ -9,6 +9,7 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+publish.workspace = true
 description = "Pricing table, cost estimation, and per-provider-per-node daily budgets. Provider /models pricing -> config override -> notional local cost."
 
 [dependencies]

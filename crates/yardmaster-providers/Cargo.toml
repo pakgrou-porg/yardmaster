@@ -9,6 +9,7 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+publish.workspace = true
 description = "Remote/LAN provider kinds behind one trait: openrouter, venice, kie, openai_compatible. list_models / chat / stream / usage / cost_estimate."
 
 [dependencies]

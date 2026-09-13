@@ -54,8 +54,8 @@ pub struct Ranked {
 /// `pending + gpuPressure` asc, then `gpuPressure` asc, then id asc.
 pub fn pair_default_order(mut nodes: Vec<NodeLoad>) -> Vec<Ranked> {
     nodes.sort_by(|a, b| {
-        let la = a.pending as u32 + a.gpu_pressure as u32;
-        let lb = b.pending as u32 + b.gpu_pressure as u32;
+        let la = a.pending + a.gpu_pressure as u32;
+        let lb = b.pending + b.gpu_pressure as u32;
         la.cmp(&lb)
             .then(a.gpu_pressure.cmp(&b.gpu_pressure))
             .then_with(|| a.id.cmp(&b.id))
@@ -113,22 +113,52 @@ mod tests {
     #[test]
     fn cold_start_is_a_stable_id_sort() {
         let order = pair_default_order(vec![
-            NodeLoad { id: "c".into(), pending: 0, gpu_pressure: 0 },
-            NodeLoad { id: "a".into(), pending: 0, gpu_pressure: 0 },
-            NodeLoad { id: "b".into(), pending: 0, gpu_pressure: 0 },
+            NodeLoad {
+                id: "c".into(),
+                pending: 0,
+                gpu_pressure: 0,
+            },
+            NodeLoad {
+                id: "a".into(),
+                pending: 0,
+                gpu_pressure: 0,
+            },
+            NodeLoad {
+                id: "b".into(),
+                pending: 0,
+                gpu_pressure: 0,
+            },
         ]);
-        assert_eq!(order.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["a", "b", "c"]);
+        assert_eq!(
+            order.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            ["a", "b", "c"]
+        );
     }
 
     // Mirrors TestRank_AscendingByPending: a=2, c=1, b=0 -> b,c,a.
     #[test]
     fn ascending_by_pending() {
         let order = pair_default_order(vec![
-            NodeLoad { id: "a".into(), pending: 2, gpu_pressure: 0 },
-            NodeLoad { id: "b".into(), pending: 0, gpu_pressure: 0 },
-            NodeLoad { id: "c".into(), pending: 1, gpu_pressure: 0 },
+            NodeLoad {
+                id: "a".into(),
+                pending: 2,
+                gpu_pressure: 0,
+            },
+            NodeLoad {
+                id: "b".into(),
+                pending: 0,
+                gpu_pressure: 0,
+            },
+            NodeLoad {
+                id: "c".into(),
+                pending: 1,
+                gpu_pressure: 0,
+            },
         ]);
-        assert_eq!(order.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["b", "c", "a"]);
+        assert_eq!(
+            order.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            ["b", "c", "a"]
+        );
         assert_eq!(order[2].rank, 2);
     }
 
@@ -137,31 +167,71 @@ mod tests {
     #[test]
     fn combines_pending_and_gpu_pressure() {
         let order = pair_default_order(vec![
-            NodeLoad { id: "a".into(), pending: 0, gpu_pressure: 3 },
-            NodeLoad { id: "b".into(), pending: 1, gpu_pressure: 0 },
-            NodeLoad { id: "c".into(), pending: 0, gpu_pressure: 1 },
-            NodeLoad { id: "d".into(), pending: 0, gpu_pressure: 2 },
+            NodeLoad {
+                id: "a".into(),
+                pending: 0,
+                gpu_pressure: 3,
+            },
+            NodeLoad {
+                id: "b".into(),
+                pending: 1,
+                gpu_pressure: 0,
+            },
+            NodeLoad {
+                id: "c".into(),
+                pending: 0,
+                gpu_pressure: 1,
+            },
+            NodeLoad {
+                id: "d".into(),
+                pending: 0,
+                gpu_pressure: 2,
+            },
         ]);
-        assert_eq!(order.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["b", "c", "d", "a"]);
+        assert_eq!(
+            order.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            ["b", "c", "d", "a"]
+        );
     }
 
     // Mirrors TestRank_NodeWideMixedEngineSynthetic: a=3, b=1, c=0 -> c,b,a.
     #[test]
     fn node_wide_mixed_engine() {
         let order = pair_default_order(vec![
-            NodeLoad { id: "a".into(), pending: 3, gpu_pressure: 0 },
-            NodeLoad { id: "b".into(), pending: 1, gpu_pressure: 0 },
-            NodeLoad { id: "c".into(), pending: 0, gpu_pressure: 0 },
+            NodeLoad {
+                id: "a".into(),
+                pending: 3,
+                gpu_pressure: 0,
+            },
+            NodeLoad {
+                id: "b".into(),
+                pending: 1,
+                gpu_pressure: 0,
+            },
+            NodeLoad {
+                id: "c".into(),
+                pending: 0,
+                gpu_pressure: 0,
+            },
         ]);
-        assert_eq!(order.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["c", "b", "a"]);
+        assert_eq!(
+            order.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            ["c", "b", "a"]
+        );
     }
 
     // Mirrors TestPressureBandsAndDownwardHysteresis (band table).
     #[test]
     fn pressure_band_table() {
         for (u, want) in [
-            (0.0, 0), (39.999, 0), (40.0, 1), (69.999, 1),
-            (70.0, 2), (84.999, 2), (85.0, 3), (100.0, 3),
+            (0.0, 0),
+            (39.999, 0),
+            (40.0, 1),
+            (69.999, 1),
+            (70.0, 2),
+            (84.999, 2),
+            (85.0, 3),
+            (100.0, 3),
         ] {
             assert_eq!(pressure_band(u), want, "pressure_band({u})");
         }
@@ -171,15 +241,15 @@ mod tests {
     #[test]
     fn pressure_hysteresis_table() {
         for (u, prev, want) in [
-            (35.0, 1, 1),   // hold one above 35
-            (34.9, 1, 0),   // drop one below 35
-            (65.0, 2, 2),   // hold two above 65
-            (64.9, 2, 1),   // drop two below 65
-            (80.0, 3, 3),   // hold three above 80
-            (79.9, 3, 2),   // drop three below 80
-            (70.0, 1, 2),   // promote at ordinary boundary
-            (90.0, 0, 3),   // cross multiple bands upward
-            (20.0, 3, 0),   // cross multiple bands downward
+            (35.0, 1, 1), // hold one above 35
+            (34.9, 1, 0), // drop one below 35
+            (65.0, 2, 2), // hold two above 65
+            (64.9, 2, 1), // drop two below 65
+            (80.0, 3, 3), // hold three above 80
+            (79.9, 3, 2), // drop three below 80
+            (70.0, 1, 2), // promote at ordinary boundary
+            (90.0, 0, 3), // cross multiple bands upward
+            (20.0, 3, 0), // cross multiple bands downward
         ] {
             assert_eq!(pressure_with_hysteresis(u, prev), want, "hyst({u},{prev})");
         }

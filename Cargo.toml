@@ -20,6 +20,11 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.96.1"
 license = "Apache-2.0"
+# Internal, tightly-coupled crates — never published to crates.io. Also lets
+# cargo-deny's `allow-wildcard-paths` (deny.toml) actually apply: crates.io
+# disallows path dependencies, so it only waives the wildcard-dependency
+# check for crates explicitly marked unpublishable.
+publish = false
 authors = ["Karl Miller"]
 repository = "https://github.com/pakgrou-porg/yardmaster"
 
@@ -64,12 +69,11 @@ opentelemetry = "0.27"
 opentelemetry-otlp = { version = "0.27", default-features = false, features = ["grpc-tonic", "trace", "metrics"] }
 opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
 parking_lot = "0.12"
-prometheus = "0.13"
+prometheus = "0.14" # 0.13 pulls protobuf 2.x (RUSTSEC-2024-0437); 0.14 requires protobuf >=3.7.2
 rand = "0.10"
-reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls-tls", "stream"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "stream"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-rustls-pemfile = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 thiserror = "2"

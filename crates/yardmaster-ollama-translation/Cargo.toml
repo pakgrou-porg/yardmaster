@@ -9,6 +9,7 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+publish.workspace = true
 description = "Ollama-native wire format <-> switchyard-protocol. Lets a client speaking /api/chat be served by an LM Studio node and vice versa."
 
 [dependencies]

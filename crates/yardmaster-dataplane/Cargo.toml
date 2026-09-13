@@ -9,6 +9,7 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+publish.workspace = true
 description = "The supervised Rust worker. Owns ports 11434/1234/4000, the two-personalities rule, the two-stage pipeline, /health, /metrics, and the 'yardmaster report' CLI."
 
 [[bin]]

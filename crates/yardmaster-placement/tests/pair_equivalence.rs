@@ -6,9 +6,7 @@
 //! assert the same results. See `tests/fixtures/README.md`.
 
 use serde::Deserialize;
-use yardmaster_placement::{
-    pair_default_order, pressure_band, pressure_with_hysteresis, NodeLoad,
-};
+use yardmaster_placement::{NodeLoad, pair_default_order, pressure_band, pressure_with_hysteresis};
 
 #[derive(Deserialize)]
 struct OrderingFixture {
@@ -110,6 +108,10 @@ fn gpu_pressure_matches_pair() {
             step.ewma_after
         );
         pressure = pressure_with_hysteresis(e, pressure as i8);
-        assert_eq!(pressure, step.pressure_after, "pressure after util={}", step.util);
+        assert_eq!(
+            pressure, step.pressure_after,
+            "pressure after util={}",
+            step.util
+        );
     }
 }

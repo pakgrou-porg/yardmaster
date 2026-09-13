@@ -9,6 +9,7 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+publish.workspace = true
 description = "libsy routing algorithm: planner/worker/judge tiering. Client hints -> stage_router signals -> judge fallback. escalate_on / demote_after_plan."
 
 [dependencies]

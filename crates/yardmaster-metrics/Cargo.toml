@@ -9,6 +9,7 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+publish.workspace = true
 description = "Event schema, SQLite (WAL) store, hourly/daily rollups, Prometheus + OTLP exporters, and the Markdown report generator. No prompt or completion text, ever."
 
 [dependencies]

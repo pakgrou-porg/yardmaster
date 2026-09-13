@@ -9,12 +9,15 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+publish.workspace = true
 description = "Reads PAIR's on-disk identity, certificates, and pin store; provides an mTLS acceptor and connector. One trust store, never a second."
 
 [dependencies]
+# PEM parsing (identity/cert/pin-store loading, not yet implemented): use
+# rustls-pki-types's PemObject trait (already in the graph via rustls) —
+# rustls-pemfile is unmaintained (RUSTSEC-2025-0134) and was never used.
 rustls.workspace = true
 tokio-rustls.workspace = true
-rustls-pemfile.workspace = true
 x509-parser.workspace = true
 tokio.workspace = true
 thiserror.workspace = true

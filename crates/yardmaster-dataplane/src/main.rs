@@ -3,11 +3,12 @@
 
 //! `yardmaster-dataplane` — the one new broker-supervised worker.
 //!
-//! Owns every inference-facing socket on a node: port 11434 (Ollama-compatible
-//! + `/v1/*`), port 1234 (OpenAI-compatible), port 4000 (Anthropic Messages +
-//! `/health` + `/metrics`). Each port applies PAIR's two-personalities rule
-//! (first byte `0x16` -> mTLS cluster ingress via `yardmaster-cluster-trust`;
-//! anything else -> plaintext, refused with 403 unless the peer is loopback).
+//! Owns every inference-facing socket on a node: port 11434
+//! (Ollama-compatible + `/v1/*`), port 1234 (OpenAI-compatible), port 4000
+//! (Anthropic Messages + `/health` + `/metrics`). Each port applies PAIR's
+//! two-personalities rule (first byte `0x16` -> mTLS cluster ingress via
+//! `yardmaster-cluster-trust`; anything else -> plaintext, refused with 403
+//! unless the peer is loopback).
 //!
 //! Request pipeline (spec 1.3):
 //!   ingress translation -> model selection (Switchyard) -> placement (PAIR,
