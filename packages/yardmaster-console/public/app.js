@@ -13,6 +13,7 @@ document.querySelectorAll("nav button").forEach((b) =>
     document.querySelectorAll("nav button").forEach((x) => x.classList.toggle("active", x === b));
     document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t.id === b.dataset.tab));
     if (b.dataset.tab === "backends") refreshBackends();
+    if (b.dataset.tab === "capabilities") refreshCapabilities();
     if (b.dataset.tab === "metrics") refreshMetrics();
     if (b.dataset.tab === "agent") loadAgent();
   }),
@@ -76,6 +77,77 @@ $("#be-auto").addEventListener("change", (e) => {
   if (e.target.checked) beTimer = setInterval(refreshBackends, 15000);
 });
 beTimer = setInterval(refreshBackends, 15000);
+
+// ---- capabilities (ADR-0028) ----
+function reachPill(r) {
+  const cls = r === "validated" ? "up" : r === "unreachable" ? "down" : "warn";
+  return `<span class="pill ${cls}">${esc(r)}</span>`;
+}
+function policyPill(p, reason) {
+  const cls = p === "enabled" ? "up" : "down";
+  return `<span class="pill ${cls}" title="${esc(reason || "")}">${esc(p)}</span>`;
+}
+async function overrideAction(id, patch) {
+  const r = await api("/api/capabilities/override", { method: "POST", body: JSON.stringify({ id, patch }) });
+  if (!r.written) alert(`Not saved: ${(r.errors || []).join("; ") || "unknown error"}`);
+  await refreshCapabilities();
+}
+async function refreshCapabilities() {
+  const d = await api("/api/capabilities");
+  if (!d.available) {
+    $("#cap-note").textContent = d.note || "router unreachable";
+    $("#cap-pending").innerHTML = "";
+    $("#cap-list").innerHTML = `<p class="dim">Set YM_DATAPLANE_MODE=router on the yardmaster service to enable this.</p>`;
+    return;
+  }
+  $("#cap-note").textContent = d.last_error ? `last reconcile error: ${d.last_error}` : "";
+
+  const pending = d.pending_ops || [];
+  $("#cap-pending").innerHTML = pending.length
+    ? `<div class="bar"><span class="msg warn">${pending.length} change(s) held for approval</span>` +
+      `<button id="cap-apply" class="primary">Apply all</button></div>` +
+      `<ul>${pending.map((o) => `<li>${esc(o.type)} <code>${esc(o.id ?? "")}</code>` +
+        `${o.from ? ` (${esc(o.from)} → ${esc(o.to)})` : ""} — <span class="dim">${esc(o.reason)}</span></li>`).join("")}</ul>`
+    : "";
+  const applyBtn = $("#cap-apply");
+  if (applyBtn) applyBtn.addEventListener("click", async () => {
+    const r = await api("/api/capabilities/apply", { method: "POST" });
+    if (r.error) alert(`Apply failed: ${r.error}`);
+    await refreshCapabilities();
+  });
+
+  const rows = [...(d.records || [])].sort((a, b) => (a.rank ?? 1e9) - (b.rank ?? 1e9) || a.id.localeCompare(b.id));
+  $("#cap-list").innerHTML =
+    `<table><tr><th>id</th><th>provider</th><th>locality</th><th>reachability</th><th>policy</th>` +
+    `<th>rank</th><th>default</th><th></th></tr>` +
+    rows
+      .map((r) => {
+        const enabled = r.policy === "enabled";
+        const actions = r.target
+          ? `<button data-act="toggle" data-id="${esc(r.id)}" data-enabled="${enabled}">${enabled ? "Disable" : "Enable"}</button>` +
+            (r.default ? "" : `<button data-act="default" data-id="${esc(r.id)}">Set default</button>`)
+          : `<span class="dim">not a target</span>`;
+        return (
+          `<tr><td>${esc(r.id)}</td><td class="dim">${esc(r.provider)}</td><td class="dim">${esc(r.locality ?? "—")}</td>` +
+          `<td>${reachPill(r.reachability)}</td><td>${policyPill(r.policy, r.policy_reason)}</td>` +
+          `<td class="dim">${r.rank ?? "—"}</td><td>${r.default ? "✓" : ""}</td><td>${actions}</td></tr>`
+        );
+      })
+      .join("") +
+    `</table>`;
+  $("#cap-list").querySelectorAll("button[data-act]").forEach((b) =>
+    b.addEventListener("click", () => {
+      const id = b.dataset.id;
+      if (b.dataset.act === "toggle") overrideAction(id, { enabled: b.dataset.enabled !== "true" });
+      else overrideAction(id, { default: true });
+    }),
+  );
+}
+$("#cap-refresh").addEventListener("click", refreshCapabilities);
+$("#cap-reconcile").addEventListener("click", async () => {
+  await api("/api/capabilities/reconcile", { method: "POST" });
+  await refreshCapabilities();
+});
 
 // ---- metrics ----
 async function refreshMetrics() {

@@ -239,6 +239,12 @@ Then open **`http://127.0.0.1:8770`** in a browser, log in, and check:
 - **Config** — paste/edit `yardmaster.toml`, **Validate**, **Save** (writes the
   bind-mounted file if present, else the data-volume copy).
 - **Backends** — live up/down + latency for every provider + the local engine.
+- **Capabilities** — the live capability registry (ADR-0028): every discovered
+  model, reachability/policy/rank, and any changes held for approval.
+  Enable/Disable and Set default write to `[harness.overrides]` in
+  `yardmaster.toml` and apply immediately (they're operator edits); "Apply
+  all" approves held changes the pipeline couldn't auto-apply on its own
+  (§7 above has the underlying `GET/POST /v1/capabilities*` detail).
 - **Agent** — the Harness embedded in an iframe (tokened URL, host-rewritten to
   match how you reached the Console). It is **also** at
   `http://<host>:3080` directly for a full-window session; both prompt for the

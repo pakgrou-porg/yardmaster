@@ -16,6 +16,7 @@ SPDX-License-Identifier: Apache-2.0
       <nav>
         <button data-tab="config" class="active">Config</button>
         <button data-tab="backends">Backends</button>
+        <button data-tab="capabilities">Capabilities</button>
         <button data-tab="metrics">Metrics</button>
         <button data-tab="agent">Agent</button>
       </nav>
@@ -40,6 +41,25 @@ SPDX-License-Identifier: Apache-2.0
           <label><input type="checkbox" id="be-auto" checked /> auto every 15s</label>
         </div>
         <div id="be-list"></div>
+      </section>
+
+      <section id="capabilities" class="tab">
+        <div class="bar">
+          <button id="cap-refresh">Refresh</button>
+          <button id="cap-reconcile">Reconcile now</button>
+          <span id="cap-note" class="dim"></span>
+        </div>
+        <div id="cap-pending"></div>
+        <div id="cap-list"></div>
+        <p class="dim">
+          The Harness's model list is discovered from <code>[targets.*]</code>
+          in <code>yardmaster.toml</code> (<a
+            href="https://github.com/pakgrou-porg/yardmaster/blob/main/docs/decisions/0028-capability-registry-pipeline.md"
+            target="_blank" rel="noreferrer">ADR-0028</a>). Enable/disable and
+          Default here write to <code>[harness.overrides.&lt;id&gt;]</code> in
+          the config — they're operator edits, so they apply immediately, same
+          as editing the Config tab by hand and saving.
+        </p>
       </section>
 
       <section id="metrics" class="tab">

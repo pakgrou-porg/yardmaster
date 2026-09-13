@@ -218,7 +218,16 @@ profile scaffold exists and tolerates an absent region on first boot.
   models block.
 - **P2** — Console "Capabilities" tab: table (id / provider / locality /
   reachability / policy / rank / default), toggles that write back to
-  `[harness.overrides]`, "view plan" / "apply now".
+  `[harness.overrides]`, "view plan" / "apply now". **Done** —
+  `packages/yardmaster-console/src/toml-overrides.mjs` (a surgical, line-based
+  writer for `[harness.overrides."<id>"]` that never round-trips the rest of
+  `yardmaster.toml` through a TOML serializer, so it can't drop the file's
+  comments) plus `GET/POST /api/capabilities*` proxying the router. UI scope
+  actually shipped: Enable/Disable and "Set default" toggles (the two
+  genuinely toggle-shaped fields) and "Reconcile now" / "Apply all"; `rank`
+  and `capabilities.*` stay Config-tab/TOML-only for now — the override
+  endpoint accepts arbitrary scalar patches, so a dedicated control for
+  either is a UI-only follow-up, not a new write path.
 - **P3** — opt-in smoke-test validation; pricing/cost normalization; project the
   enabled set onto the router's `/v1/models`; per-model capability hints on
   responses.

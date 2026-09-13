@@ -15,11 +15,22 @@
  *   GET  /api/backends               probe every provider/target + local engine
  *   GET  /api/metrics?hours=24       read-only view of yardmaster-metrics.db
  *   GET  /api/agent                  { url } for the embedded dsh Web UI
+ *   GET  /api/capabilities           proxy: the router's capability registry (ADR-0028 P2)
+ *   POST /api/capabilities/reconcile proxy: run the pipeline now
+ *   POST /api/capabilities/apply     proxy: approve every held (pending) op
+ *   POST /api/capabilities/override  body: {id, patch} -> upsert [harness.overrides.<id>],
+ *                                    validate, save (same gate as PUT /api/config)
  *   GET  /  (and static assets)      the SPA
  *
  * Binds 127.0.0.1 by default. Set YM_CONSOLE_BIND=0.0.0.0 to serve the LAN; when
  * you do, enable HTTP Basic Auth with YM_AUTH_ENABLED=1 + YM_AUTH_USER +
  * YM_AUTH_PASS (or YM_AUTH_PASS_FILE). /healthz stays open for health probes.
+ *
+ * The capability-registry endpoints proxy YM_ROUTER_URL (default
+ * http://127.0.0.1:${YM_ROUTER_PORT}) — the router that normally runs
+ * alongside this process in the same container (YM_DATAPLANE_MODE=router).
+ * If it's not reachable (proxy-only mode, or not up yet) they report that
+ * plainly rather than failing the whole Console.
  */
 
 import { createServer } from "node:http";
@@ -33,6 +44,7 @@ import { execFile } from "node:child_process";
 import { validateConfig } from "./validate.mjs";
 import { probeBackends } from "./backends.mjs";
 import { readMetrics } from "./metrics.mjs";
+import { upsertHarnessOverride } from "./toml-overrides.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PUBLIC = join(HERE, "..", "public");
@@ -51,6 +63,7 @@ const cfg = {
   // The harness entrypoint writes the current tokened URL here.
   harnessUrlFile: process.env.YM_HARNESS_URL_FILE || "/dshhome/web-url",
   localEngineUrl: process.env.YM_LOCAL_ENGINE_URL || "",
+  routerUrl: process.env.YM_ROUTER_URL || `http://127.0.0.1:${process.env.YM_ROUTER_PORT || 4000}`,
   dataplaneBin: process.env.YM_DATAPLANE_BIN || "", // e.g. /opt/yardmaster/bin/yardmaster-dataplane
   // Shared admin credential store — the Harness auth proxy reads the same file.
   authFile:
@@ -216,6 +229,57 @@ function validateWithDataplane(raw) {
   });
 }
 
+/**
+ * Validate + write `raw` to whichever of configPath/fallbackConfigPath is
+ * writable. Shared by PUT /api/config and POST /api/capabilities/override so
+ * both go through the exact same safety gate — a rejected validation never
+ * touches disk either way.
+ */
+async function saveConfig(raw) {
+  const dp = await validateWithDataplane(raw);
+  const v = dp || validateConfig(raw);
+  if (!v.ok) return { status: 400, body: { written: false, ...v } };
+  const target = await writablePath();
+  if (!target) {
+    return {
+      status: 500,
+      body: {
+        written: false,
+        errors: [
+          `neither ${cfg.configPath} nor ${cfg.fallbackConfigPath} is writable — ` +
+            `check the /data volume ownership (the console runs as uid 10001; run yardmaster-init)`,
+        ],
+        warnings: v.warnings,
+      },
+    };
+  }
+  try {
+    // A dangling symlink at the config path (e.g. a removed read-only /config
+    // bind mount) makes writeFile ENOENT — replace it with a real file.
+    try {
+      const st = await lstat(target);
+      if (st.isSymbolicLink() && !existsSync(target)) await unlink(target);
+    } catch {
+      /* nothing there — fine */
+    }
+    await mkdir(dirname(target), { recursive: true });
+    await writeFile(target, raw, "utf8");
+  } catch (e) {
+    return { status: 500, body: { written: false, errors: [`write failed: ${e.message}`], warnings: v.warnings } };
+  }
+  return { status: 200, body: { written: true, path: target, ...v } };
+}
+
+/** Proxy a request to the router. `null` if it's unreachable (not running, wrong mode). */
+async function fetchRouter(path, opt) {
+  try {
+    const r = await fetch(`${cfg.routerUrl}${path}`, { ...opt, signal: AbortSignal.timeout(5000) });
+    return { status: r.status, body: await r.json() };
+  } catch {
+    return null;
+  }
+}
+
 async function handleApi(req, res, url) {
   if (url.pathname === "/healthz") return json(res, 200, { ok: true });
 
@@ -294,41 +358,54 @@ async function handleApi(req, res, url) {
 
   if (url.pathname === "/api/config" && req.method === "PUT") {
     const raw = await readBody(req);
-    const dp = await validateWithDataplane(raw);
-    const v = dp || validateConfig(raw);
-    if (!v.ok) return json(res, 400, { written: false, ...v });
-    const target = await writablePath();
-    if (!target) {
-      return json(res, 500, {
-        written: false,
-        errors: [
-          `neither ${cfg.configPath} nor ${cfg.fallbackConfigPath} is writable — ` +
-            `check the /data volume ownership (the console runs as uid 10001; run yardmaster-init)`,
-        ],
-        warnings: v.warnings,
-      });
-    }
-    try {
-      // A dangling symlink at the config path (e.g. a removed read-only /config
-      // bind mount) makes writeFile ENOENT — replace it with a real file.
-      try {
-        const st = await lstat(target);
-        if (st.isSymbolicLink() && !existsSync(target)) await unlink(target);
-      } catch {
-        /* nothing there — fine */
-      }
-      await mkdir(dirname(target), { recursive: true });
-      await writeFile(target, raw, "utf8");
-    } catch (e) {
-      return json(res, 500, { written: false, errors: [`write failed: ${e.message}`], warnings: v.warnings });
-    }
-    return json(res, 200, { written: true, path: target, ...v });
+    const r = await saveConfig(raw);
+    return json(res, r.status, r.body);
   }
 
   if (url.pathname === "/api/backends" && req.method === "GET") {
     const { raw } = await loadConfig();
     const backends = await probeBackends(raw, { localEngineUrl: cfg.localEngineUrl });
     return json(res, 200, { backends });
+  }
+
+  if (url.pathname === "/api/capabilities" && req.method === "GET") {
+    const r = await fetchRouter("/v1/capabilities");
+    if (!r) return json(res, 200, { available: false, note: `router unreachable at ${cfg.routerUrl} (not running, or YM_DATAPLANE_MODE != router)` });
+    return json(res, 200, { available: true, ...r.body });
+  }
+
+  if (url.pathname === "/api/capabilities/reconcile" && req.method === "POST") {
+    const r = await fetchRouter("/v1/capabilities/reconcile", { method: "POST" });
+    if (!r) return json(res, 502, { error: `router unreachable at ${cfg.routerUrl}` });
+    return json(res, r.status, r.body);
+  }
+
+  if (url.pathname === "/api/capabilities/apply" && req.method === "POST") {
+    const r = await fetchRouter("/v1/capabilities/apply", { method: "POST" });
+    if (!r) return json(res, 502, { error: `router unreachable at ${cfg.routerUrl}` });
+    return json(res, r.status, r.body);
+  }
+
+  // Toggle an override: {id, patch: {enabled?, default?, rank?}}. Reads the
+  // config from wherever /api/config reads it, upserts the one table, and
+  // saves through the same validate-then-write gate PUT /api/config uses —
+  // an override write can never bypass validation.
+  if (url.pathname === "/api/capabilities/override" && req.method === "POST") {
+    let body;
+    try {
+      body = JSON.parse(await readBody(req));
+    } catch {
+      return json(res, 400, { written: false, errors: ["invalid JSON body"] });
+    }
+    const id = String(body.id || "");
+    const patch = body.patch && typeof body.patch === "object" ? body.patch : null;
+    if (!id || !patch || Object.keys(patch).length === 0) {
+      return json(res, 400, { written: false, errors: ["body must be { id: string, patch: {...} }"] });
+    }
+    const { raw } = await loadConfig();
+    const next = upsertHarnessOverride(raw, id, patch);
+    const r = await saveConfig(next);
+    return json(res, r.status, r.body);
   }
 
   if (url.pathname === "/api/metrics" && req.method === "GET") {

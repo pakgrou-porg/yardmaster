@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, symlinkSync, existsSync, lstatSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createServer } from "node:http";
 
 // Auth is ON by default now; the non-auth functional tests run with it disabled.
 process.env.YM_AUTH_DISABLED = "1";
@@ -224,4 +225,111 @@ test("server: PUT replaces a dangling symlink at the config path", async (t) => 
   const r = await (await fetch(`${base}/api/config`, { method: "PUT", body })).json();
   assert.equal(r.written, true, JSON.stringify(r));
   assert.equal(lstatSync(cfgPath).isSymbolicLink(), false, "symlink replaced by a real file");
+});
+
+test("server: /api/capabilities proxies the router; reports unavailable when it's unreachable", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "ymc-"));
+  writeFileSync(join(dir, "yardmaster.toml"), `schema_version = 1\n[targets]\n`);
+  process.env.YM_CONFIG_PATH = join(dir, "yardmaster.toml");
+  process.env.YM_CONFIG_FALLBACK = join(dir, "fallback.toml");
+  process.env.YM_METRICS_DB = join(dir, "none.db");
+
+  // A stub standing in for the router: records what it was asked, replies
+  // with a small fixed registry.
+  let lastPath = null;
+  let lastMethod = null;
+  const stub = createServer((req, res) => {
+    lastPath = req.url;
+    lastMethod = req.method;
+    res.writeHead(200, { "content-type": "application/json" });
+    if (req.url === "/v1/capabilities") {
+      res.end(JSON.stringify({ records: [{ id: "m1" }], applied: [{ id: "m1" }], pending_ops: [] }));
+    } else if (req.url === "/v1/capabilities/apply") {
+      res.end(JSON.stringify({ applied: true }));
+    } else {
+      res.end(JSON.stringify({}));
+    }
+  });
+  await new Promise((r) => stub.listen(0, "127.0.0.1", r));
+  process.env.YM_ROUTER_URL = `http://127.0.0.1:${stub.address().port}`;
+
+  const { createConsoleServer } = await import(`../src/server.mjs?capabilities`);
+  const srv = createConsoleServer();
+  await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+  const base = `http://127.0.0.1:${srv.address().port}`;
+  t.after(() => {
+    srv.close();
+    stub.close();
+    rmSync(dir, { recursive: true, force: true });
+    delete process.env.YM_ROUTER_URL;
+  });
+
+  const caps = await (await fetch(`${base}/api/capabilities`)).json();
+  assert.equal(caps.available, true);
+  assert.equal(caps.records[0].id, "m1");
+  assert.equal(lastPath, "/v1/capabilities");
+
+  const applied = await (await fetch(`${base}/api/capabilities/apply`, { method: "POST" })).json();
+  assert.equal(applied.applied, true);
+  assert.equal(lastPath, "/v1/capabilities/apply");
+  assert.equal(lastMethod, "POST");
+
+  // Unreachable router: /api/capabilities degrades gracefully (200,
+  // available:false); the write-through endpoints report 502.
+  await new Promise((r) => stub.close(r));
+  const down = await (await fetch(`${base}/api/capabilities`)).json();
+  assert.equal(down.available, false);
+  assert.match(down.note, /router unreachable/);
+  const reconcileDown = await fetch(`${base}/api/capabilities/reconcile`, { method: "POST" });
+  assert.equal(reconcileDown.status, 502);
+});
+
+test("server: /api/capabilities/override upserts [harness.overrides.<id>] and saves through the validate gate", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "ymc-"));
+  const cfgPath = join(dir, "yardmaster.toml");
+  writeFileSync(
+    cfgPath,
+    `schema_version = 1\n[targets]\n[routes.d]\nid="d"\ntype="passthrough"\ntarget="x"\n[targets.x]\nid="qwen/qwen3.8-flash"\n`,
+  );
+  process.env.YM_CONFIG_PATH = cfgPath;
+  process.env.YM_CONFIG_FALLBACK = join(dir, "fallback.toml");
+  process.env.YM_METRICS_DB = join(dir, "none.db");
+
+  const { createConsoleServer } = await import(`../src/server.mjs?override`);
+  const srv = createConsoleServer();
+  await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+  const base = `http://127.0.0.1:${srv.address().port}`;
+  t.after(() => {
+    srv.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const r1 = await (
+    await fetch(`${base}/api/capabilities/override`, {
+      method: "POST",
+      body: JSON.stringify({ id: "qwen/qwen3.8-flash", patch: { enabled: false } }),
+    })
+  ).json();
+  assert.equal(r1.written, true, JSON.stringify(r1));
+  const raw1 = readFileSync(cfgPath, "utf8");
+  assert.match(raw1, /\[harness\.overrides\."qwen\/qwen3\.8-flash"\]/);
+  assert.match(raw1, /^enabled = false$/m);
+  assert.match(raw1, /^\[routes\.d\]/m, "the rest of the file is untouched");
+
+  // A second call updates in place rather than duplicating the table.
+  const r2 = await (
+    await fetch(`${base}/api/capabilities/override`, {
+      method: "POST",
+      body: JSON.stringify({ id: "qwen/qwen3.8-flash", patch: { default: true } }),
+    })
+  ).json();
+  assert.equal(r2.written, true, JSON.stringify(r2));
+  const raw2 = readFileSync(cfgPath, "utf8");
+  assert.equal((raw2.match(/\[harness\.overrides\./g) || []).length, 1, "still exactly one table for this id");
+  assert.match(raw2, /^enabled = false$/m);
+  assert.match(raw2, /^default = true$/m);
+
+  // A malformed request is rejected before touching the file.
+  const bad = await fetch(`${base}/api/capabilities/override`, { method: "POST", body: JSON.stringify({ id: "" }) });
+  assert.equal(bad.status, 400);
 });
