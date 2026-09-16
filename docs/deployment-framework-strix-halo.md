@@ -488,7 +488,7 @@ Set on the `ollama` service (defaults in the stack are sane):
 | `nvidia-smi unavailable` / `detected 0 GPU(s)` in logs | expected on AMD — PAIR's GPU telemetry is NVIDIA-only. Does not affect the engine's GPU use. [#48](https://github.com/pakgrou-porg/yardmaster/issues/48). |
 | a container exits and the whole unit restarts | by design — `yardmaster` supervises broker + console + bridge; `yardmaster-harness` supervises `dsh` + the auth proxy. Check `docker logs <name>` for which child died. |
 | "container name already in use" on redeploy | `docker rm -f yardmaster yardmaster-ollama yardmaster-harness` (and any leftovers from an older revision: `yardmaster-init yardmaster-console yardmaster-lan-shim yardmaster-harness-shim yardmaster-harness-proxy`) then redeploy. |
-| Portainer build fails in `rust-build` | not used by `target: runtime-proxy` — don't change the target. Tracked by [#36](https://github.com/pakgrou-porg/yardmaster/issues/36). |
+| Portainer build fails in `rust-build` | this deployment uses `target: runtime-proxy`, which never builds that stage — check the stack file didn't get changed to `target: runtime` (the Rust-inclusive image; builds fine on its own, but isn't what any shipped stack uses yet, since the broker doesn't route to it — issue #26). |
 
 ---
 

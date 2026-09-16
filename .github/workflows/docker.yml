@@ -68,8 +68,6 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=sha
       - name: Build node image (and push on non-PR)
-        # continue-on-error until the Rust workspace compiles (issue #36).
-        continue-on-error: true
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -80,6 +78,22 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          provenance: false
+
+      - name: Build runtime target (Rust yardmaster-dataplane) — verify only, no push
+        # Not yet used by any deploy stack (YM_DATAPLANE_MODE=proxy is still
+        # the default until the broker learns --dataplane-path, issue #26),
+        # so nothing here needs a tag or a registry push — this step exists
+        # purely so a change that breaks the Rust build fails CI instead of
+        # going unnoticed until #26 lands and someone finally builds `runtime`.
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          target: runtime
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max,scope=runtime
           provenance: false
 
       - name: Console image metadata

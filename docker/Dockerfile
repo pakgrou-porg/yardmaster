@@ -10,10 +10,13 @@
 #       Go workers only (PAIR ollama-proxy + lmstudio-proxy). Builds today.
 #       Run it with YM_DATAPLANE_MODE=proxy.
 #
-#   docker build -f docker/Dockerfile -t yardmaster:dev .
-#       Full image, adds the Rust yardmaster-dataplane. The rust-build stage
-#       needs the Cargo workspace to compile (issue #36) and build-time network
-#       for the pinned Switchyard git deps.
+#   docker build -f docker/Dockerfile --target runtime -t yardmaster:dev .
+#       Full image, adds the Rust yardmaster-dataplane. Not yet used by any
+#       deploy stack (YM_DATAPLANE_MODE=proxy is still the default — the
+#       broker doesn't know --dataplane-path yet, issue #26); this target
+#       exists so the binary builds and ships as soon as that lands. The
+#       rust-build stage needs build-time network for the pinned Switchyard
+#       git deps.
 
 # ---------------------------------------------------------------------------
 # Stage — Go: vendored PAIR services + yardmaster-lan-scanner
@@ -37,12 +40,11 @@ RUN mkdir -p /out \
 # ---------------------------------------------------------------------------
 FROM rust:1.96-bookworm AS rust-build
 WORKDIR /src
-COPY rust-toolchain.toml Cargo.toml ./
+COPY rust-toolchain.toml Cargo.toml Cargo.lock ./
 COPY crates/ ./crates/
 COPY patches/ ./patches/
-# No Cargo.lock committed yet (issue #36); drop --locked until it lands.
 RUN mkdir -p /out \
-    && cargo build --release -p yardmaster-dataplane \
+    && cargo build --release --locked -p yardmaster-dataplane \
     && cp target/release/yardmaster-dataplane /out/yardmaster-dataplane
 
 # ---------------------------------------------------------------------------
