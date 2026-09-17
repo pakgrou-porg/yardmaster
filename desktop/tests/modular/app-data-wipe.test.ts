@@ -10,8 +10,15 @@ import { currentPlatform } from '@/shared/utils/platform'
 /**
  * The wipe inventory lives in repo-root shell scripts (no Node required).
  * These smoke checks keep the twins aligned on the critical roots.
+ *
+ * SKIPPED: scripts/wipe-app-data.{sh,ps1,cmd} don't exist in this repo. The
+ * `desktop/` subtree vendors NVIDIA PAIR's desktop app (commit 57e8710), but
+ * these scripts apparently lived at the upstream repo's root, outside the
+ * `desktop/` subtree path pulled in — they never got vendored, while this
+ * test (living inside desktop/tests/) came along for free. Re-enable once
+ * they're sourced from upstream or deliberately authored. See #53.
  */
-describe('repo-root wipe scripts', () => {
+describe.skip('repo-root wipe scripts', () => {
     const scriptsDir = path.resolve(process.cwd(), '../scripts')
     const sh = path.join(scriptsDir, 'wipe-app-data.sh')
     const ps1 = path.join(scriptsDir, 'wipe-app-data.ps1')
