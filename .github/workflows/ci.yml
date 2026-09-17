@@ -63,9 +63,19 @@ jobs:
         # upstream's own lint (e.g. unreachable code in a *_test.go); that is
         # NVIDIA's to fix, not a Yardmaster CI gate. `go test` above still runs
         # the high-confidence vet subset on every module.
+        #
+        # staticcheck/govulncheck versions are pinned, not @latest: both tools'
+        # newest releases (staticcheck v0.8.x, govulncheck v1.8.x) require Go
+        # >=1.26, but go-version above is pinned to 1.25 — @latest silently
+        # started failing every run once those released, unrelated to any
+        # diff (caught on a Dependabot PR with a zero-Go-code change; a fresh
+        # `go install ... @latest` on that runner just happened to resolve
+        # the too-new release before a stale module-cache hit on other runs
+        # papered over it). Bump these alongside go-version, deliberately,
+        # not by surprise.
         run: |
-          go install honnef.co/go/tools/cmd/staticcheck@latest
-          go install golang.org/x/vuln/cmd/govulncheck@latest
+          go install honnef.co/go/tools/cmd/staticcheck@v0.7.0
+          go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
           cd services/yardmaster-lan-scanner
           go vet ./...
           staticcheck ./...
