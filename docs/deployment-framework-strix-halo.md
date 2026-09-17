@@ -386,6 +386,11 @@ longer generates any of this; it only scaffolds the dsh profile on first boot.
   used for MCP servers below) is never touched by the pipeline.
 - `DSH_HOME` is the dedicated `yardmaster-harness` volume, so the signed-cookie
   secret, sessions, and credentials persist across restarts.
+- dsh's actual agent workspaces — every folder in the sidebar, where it does
+  its file-editing work — live under `$HOME` (`/home/yardmaster`), a
+  **separate** volume (`yardmaster-agent-home`) from `DSH_HOME` above. Without
+  it, `$HOME` is just `useradd --create-home` baked into the image and every
+  workspace is gone on the next redeploy.
 
 `dsh web` accepts only `--host` / `--port` / `--trusted-host` / `--no-open`. It
 does **not** accept `--set`.
@@ -512,8 +517,13 @@ identity across restarts.
 ```bash
 docker run --rm -v yardmaster-data:/data -v "$PWD":/backup busybox \
   tar czf /backup/yardmaster-data.tgz -C /data .
+docker run --rm -v yardmaster-agent-home:/home -v "$PWD":/backup busybox \
+  tar czf /backup/yardmaster-agent-home.tgz -C /home .
 ```
 
 `yardmaster-data` holds the pairing identity, `yardmaster.toml`, the metrics DB,
 and the admin credential — losing it means re-pairing and re-running setup.
-`yardmaster-harness` holds the `dsh` session state. The model volume is a cache.
+`yardmaster-harness` holds the `dsh` session state. `yardmaster-agent-home`
+holds the actual files the agent has created/edited — the one volume here
+that isn't reproducible from anything else, worth backing up like any other
+real work. The model volume is a cache.

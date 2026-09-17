@@ -87,7 +87,7 @@ bundled Console).
 
 ## Persistent state
 
-Two named volumes:
+Three named volumes:
 
 ```
 yardmaster-data      -> /data     (yardmaster container)
@@ -100,6 +100,13 @@ yardmaster-data      -> /data     (yardmaster container)
 yardmaster-harness   -> /dshhome  (yardmaster-harness container; mounted rw in
                                    yardmaster too — it writes the model list)
   profiles/web/cordis.patch.yml   ← managed region (ADR-0028) + sessions; cookie secret; web-url
+yardmaster-agent-home -> /home/yardmaster  (yardmaster-harness container only)
+  the dsh agent's actual HOME — every workspace it creates (what you see in the
+  sidebar) lives here. Without this volume it's just `useradd --create-home`
+  baked into the image: gone on the next redeploy. Separate from
+  yardmaster-harness/dshhome (dsh's *config* — sessions, cookie secret,
+  cordis.patch.yml) because HOME is where the agent's own file-editing work
+  product lives, not dsh's own state.
 ```
 
 Each entrypoint chowns its own volume on start — no `yardmaster-init`.

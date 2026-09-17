@@ -128,9 +128,11 @@ services:
       YM_AUTH_PASS: "${YM_AUTH_PASS:-}"
     volumes:
       - yardmaster-harness:/dshhome
+      - yardmaster-agent-home:/home/yardmaster      # dsh's HOME — its actual agent workspaces
       - yardmaster-data:/data:ro                    # read the shared admin credential
 
 volumes:
   ollama-models: { name: yardmaster-ollama-models }
   yardmaster-data: { name: yardmaster-data }
   yardmaster-harness: { name: yardmaster-harness }
+  yardmaster-agent-home: { name: yardmaster-agent-home }

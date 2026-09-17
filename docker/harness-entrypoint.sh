@@ -20,6 +20,11 @@
 # and dsh's `patchReload: live` picks up the change with no restart. See
 # packages/yardmaster-router/src/capabilities.mjs.
 #
+# HOME (/home/yardmaster) is its own named volume, not baked into the image:
+# it's where dsh actually creates its agent workspaces (every folder you see
+# in the sidebar — a plain `useradd --create-home` directory only survives
+# until the next `docker compose up`/redeploy recreates the container).
+#
 # Env: DSH_HOME, YM_HARNESS_PORT (3080), YM_HARNESS_PROXY_PORT (3081),
 #      YM_HARNESS_TRUSTED_HOSTS (space-separated host[:port]),
 #      YM_HARNESS_EXTRA_ARGS (extra `dsh web` flags only),
@@ -27,17 +32,19 @@
 set -eu
 
 : "${DSH_HOME:=/dshhome}"
+AGENT_HOME=/home/yardmaster
 
 # --- drop privileges once, after fixing volume ownership -------------------
 if [ "$(id -u)" = "0" ]; then
-  mkdir -p "${DSH_HOME}"
-  chown -R 10001:10001 "${DSH_HOME}" 2>/dev/null || true
+  mkdir -p "${DSH_HOME}" "${AGENT_HOME}"
+  chown -R 10001:10001 "${DSH_HOME}" "${AGENT_HOME}" 2>/dev/null || true
   exec gosu 10001:10001 "$0" "$@"
 fi
 
 # gosu keeps the env but not HOME; npm/npx (for MCP servers spawned via `npx -y`)
-# need a writable HOME + a cache that persists on the volume.
-export HOME=/home/yardmaster
+# need a writable HOME + a cache that persists on the volume. AGENT_HOME is
+# also where dsh creates its agent workspaces — see the note above.
+export HOME="${AGENT_HOME}"
 export npm_config_cache="${npm_config_cache:-${DSH_HOME}/.npm-cache}"
 mkdir -p "${npm_config_cache}" 2>/dev/null || true
 
