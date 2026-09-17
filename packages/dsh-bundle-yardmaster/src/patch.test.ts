@@ -4,7 +4,7 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import yaml from "js-yaml";
+import { load } from "js-yaml";
 
 const here = (p: string) => fileURLToPath(new URL(p, import.meta.url));
 
@@ -18,7 +18,7 @@ const ALLOWED_OVERRIDE_IDS = new Set(["agent-default-model"]);
 const EXPECTED_INSERT = { id: "yardmaster", name: "@pakgrou-porg/dsh-yardmaster" };
 
 describe("cordis.patch.yml", () => {
-  const doc = yaml.load(readFileSync(here("../cordis.patch.yml"), "utf8")) as unknown[];
+  const doc = load(readFileSync(here("../cordis.patch.yml"), "utf8")) as unknown[];
 
   it("is a non-empty YAML sequence", () => {
     expect(Array.isArray(doc)).toBe(true);
