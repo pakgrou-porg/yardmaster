@@ -130,6 +130,16 @@ services:
       - yardmaster-harness:/dshhome
       - yardmaster-agent-home:/home/yardmaster      # dsh's HOME — its actual agent workspaces
       - yardmaster-data:/data:ro                    # read the shared admin credential
+      # To keep the agent's workspaces on the host instead of a named volume
+      # (direct browsing, your own backup tooling, …), replace the
+      # yardmaster-agent-home line above with a bind mount:
+      #   - /path/on/host:/home/yardmaster
+      # then own it so both the container (uid 10001) and you can read/write:
+      #   docker run --rm -v /path/on/host:/target alpine sh -c \
+      #     'chown -R 10001:<your-gid> /target && chmod -R 2775 /target'
+      # (`chown -R 10001:<your-gid> . && chmod -R 2775 .` works directly from
+      # the host too, if you have root — the throwaway container avoids
+      # needing sudo.)
 
 volumes:
   ollama-models: { name: yardmaster-ollama-models }
