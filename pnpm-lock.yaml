@@ -10,7 +10,7 @@ importers:
     devDependencies:
       '@deepseek-ai/dsh':
         specifier: 0.1.2-rc.1
-        version: 0.1.2-rc.1(cbl3bhtsxlj4loa3nidzjxeqsy)
+        version: 0.1.2-rc.1(t4ekhkah23qtirn237yg2mb2g4)
       '@pakgrou-porg/dsh-yardmaster':
         specifier: workspace:*
         version: link:../dsh-yardmaster
@@ -18,8 +18,8 @@ importers:
         specifier: ^5.4.1
         version: 5.4.2
       typescript:
-        specifier: ^5.6.0
-        version: 5.9.3
+        specifier: ^7.0.2
+        version: 7.0.2
       vitest:
         specifier: ^2.1.0
         version: 2.1.9(@types/node@26.5.0)
