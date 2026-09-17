@@ -37,7 +37,12 @@ AGENT_HOME=/home/yardmaster
 # --- drop privileges once, after fixing volume ownership -------------------
 if [ "$(id -u)" = "0" ]; then
   mkdir -p "${DSH_HOME}" "${AGENT_HOME}"
-  chown -R 10001:10001 "${DSH_HOME}" "${AGENT_HOME}" 2>/dev/null || true
+  chown -R 10001:10001 "${DSH_HOME}" 2>/dev/null || true
+  # AGENT_HOME may be a host bind mount someone deliberately group-owns for
+  # their own read/write access (see the bind-mount note in
+  # deploy/portainer/*.stack.yml) — fix only the owner (needed for the
+  # container's own writes as uid 10001) without clobbering that group.
+  chown -R 10001 "${AGENT_HOME}" 2>/dev/null || true
   exec gosu 10001:10001 "$0" "$@"
 fi
 
