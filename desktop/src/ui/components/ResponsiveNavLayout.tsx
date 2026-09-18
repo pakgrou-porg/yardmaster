@@ -56,17 +56,23 @@ export function ResponsiveNavLayout({
 
     const useWideNav = width === null || width >= minWidth
 
+    // These items switch views in place (activeId/onActiveChange) rather than navigating to a
+    // URL, so per the library's own guidance they render via `asChild` onto a real `<button>`
+    // instead of the default `<a href>` — keyboard/AT users get a button, not a dead link.
+    // `href` is still required by VerticalNavBaseLeafItem's type even though asChild means it's
+    // never actually rendered.
     const verticalNavItems = useMemo(
         () =>
             items.map(item => ({
                 id: item.id,
-                children: item.label,
-                active: activeId === item.id,
-                attributes: {
-                    VerticalNavListItem: {
-                        onClick: () => onActiveChange(item.id)
-                    }
-                }
+                href: `#${item.id}`,
+                asChild: true,
+                children: (
+                    <button type="button" onClick={() => onActiveChange(item.id)}>
+                        {item.label}
+                    </button>
+                ),
+                active: activeId === item.id
             })),
         [items, activeId, onActiveChange]
     )

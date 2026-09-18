@@ -97,8 +97,10 @@ export default defineConfig({
                     testTimeout: 60_000,
                     // Run E2E sequentially to avoid port collisions and to
                     // keep the host's resource graph readable when triaging.
+                    // vitest 5 removed poolOptions.forks.singleFork; fileParallelism: false
+                    // is the replacement (forces maxWorkers to 1).
                     pool: 'forks',
-                    poolOptions: { forks: { singleFork: true } }
+                    fileParallelism: false
                 }
             }
         ]
