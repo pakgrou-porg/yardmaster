@@ -121,7 +121,7 @@
         "knip": "^6.4.1",
         "license-checker-rseidelsohn": "^4.4.2",
         "postcss": "^8.5.28",
-        "prettier": "^3.5.3",
+        "prettier": "^3.9.7",
         "tailwindcss": "^4.1.8",
         "tsx": "^4.23.13",
         "typescript": "^5.8.2",
