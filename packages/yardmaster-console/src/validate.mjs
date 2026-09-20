@@ -36,8 +36,15 @@ const TARGET_KEYS = new Set([
 ]);
 // [harness] — the DeepSeek Harness capability registry (ADR-0028).
 const HARNESS_KEYS = new Set(["default_model", "policy", "overrides"]);
-const HARNESS_POLICY_KEYS = new Set(["deny_glob", "min_context_window", "rank_by_locality", "smoke_test", "smoke_test_interval_s"]);
-const HARNESS_OVERRIDE_KEYS = new Set(["enabled", "rank", "context_window", "capabilities", "default"]);
+const HARNESS_POLICY_KEYS = new Set([
+  "deny_glob",
+  "min_context_window",
+  "rank_by_locality",
+  "smoke_test",
+  "smoke_test_interval_s",
+  "require_approval",
+]);
+const HARNESS_OVERRIDE_KEYS = new Set(["enabled", "rank", "context_window", "capabilities", "default", "approved"]);
 const HARNESS_CAPABILITY_FLAGS = new Set(["tools", "vision", "reasoning"]);
 const LOCALITIES_FOR_RANK = new Set(["cluster", "lan", "remote"]);
 const PROVIDER_KEYS = new Set([
@@ -242,6 +249,9 @@ export function validateConfig(rawText) {
     if (policy.smoke_test_interval_s !== undefined && !(Number.isInteger(policy.smoke_test_interval_s) && policy.smoke_test_interval_s > 0)) {
       errors.push("`harness.policy.smoke_test_interval_s` must be a positive integer");
     }
+    if (policy.require_approval !== undefined && typeof policy.require_approval !== "boolean") {
+      errors.push("`harness.policy.require_approval` must be a boolean");
+    }
     const overrides = h.overrides ?? {};
     let defaultOverrides = 0;
     for (const [id, ov] of Object.entries(overrides)) {
@@ -255,6 +265,7 @@ export function validateConfig(rawText) {
         if (!HARNESS_OVERRIDE_KEYS.has(k)) errors.push(`unknown key \`${at}.${k}\``);
       }
       if (ov.enabled !== undefined && typeof ov.enabled !== "boolean") errors.push(`\`${at}.enabled\` must be a boolean`);
+      if (ov.approved !== undefined && typeof ov.approved !== "boolean") errors.push(`\`${at}.approved\` must be a boolean`);
       if (ov.rank !== undefined && typeof ov.rank !== "number") errors.push(`\`${at}.rank\` must be a number`);
       if (ov.context_window !== undefined && !(Number.isInteger(ov.context_window) && ov.context_window > 0)) {
         errors.push(`\`${at}.context_window\` must be a positive integer`);

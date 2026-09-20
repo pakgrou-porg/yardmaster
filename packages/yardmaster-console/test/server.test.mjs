@@ -333,3 +333,107 @@ test("server: /api/capabilities/override upserts [harness.overrides.<id>] and sa
   const bad = await fetch(`${base}/api/capabilities/override`, { method: "POST", body: JSON.stringify({ id: "" }) });
   assert.equal(bad.status, 400);
 });
+
+test("server: /api/capabilities/policy upserts [harness.policy] and saves through the validate gate", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "ymc-"));
+  const cfgPath = join(dir, "yardmaster.toml");
+  writeFileSync(cfgPath, `schema_version = 1\n[targets]\n[harness.policy]\nsmoke_test = true\n`);
+  process.env.YM_CONFIG_PATH = cfgPath;
+  process.env.YM_CONFIG_FALLBACK = join(dir, "fallback.toml");
+  process.env.YM_METRICS_DB = join(dir, "none.db");
+
+  const { createConsoleServer } = await import(`../src/server.mjs?policy`);
+  const srv = createConsoleServer();
+  await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+  const base = `http://127.0.0.1:${srv.address().port}`;
+  t.after(() => {
+    srv.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const r1 = await (
+    await fetch(`${base}/api/capabilities/policy`, {
+      method: "POST",
+      body: JSON.stringify({ patch: { require_approval: true } }),
+    })
+  ).json();
+  assert.equal(r1.written, true, JSON.stringify(r1));
+  const raw1 = readFileSync(cfgPath, "utf8");
+  assert.match(raw1, /^\[harness\.policy\]$/m);
+  assert.match(raw1, /^require_approval = true$/m);
+  assert.match(raw1, /^smoke_test = true$/m, "unpatched policy key untouched");
+
+  const badBody = await fetch(`${base}/api/capabilities/policy`, { method: "POST", body: JSON.stringify({}) });
+  assert.equal(badBody.status, 400);
+
+  const badType = await (
+    await fetch(`${base}/api/capabilities/policy`, {
+      method: "POST",
+      body: JSON.stringify({ patch: { require_approval: "yes" } }),
+    })
+  ).json();
+  assert.equal(badType.written, false, "the validate gate rejects a bad type before it can land on disk");
+});
+
+test("server: /api/capabilities/approve-live grandfathers the currently-applied set in one write", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "ymc-"));
+  const cfgPath = join(dir, "yardmaster.toml");
+  writeFileSync(
+    cfgPath,
+    `schema_version = 1\n[targets]\n[targets.a]\nid="a/model"\n[targets.b]\nid="b/model"\n[targets.c]\nid="c/model"\n`,
+  );
+  process.env.YM_CONFIG_PATH = cfgPath;
+  process.env.YM_CONFIG_FALLBACK = join(dir, "fallback.toml");
+  process.env.YM_METRICS_DB = join(dir, "none.db");
+
+  // A real router would reflect the override back on its next reconcile;
+  // this stub approximates that by reading the same file the Console just
+  // wrote, so the "nothing left to grandfather" second call is a real check
+  // rather than a static fixture.
+  const stub = createServer((req, res) => {
+    res.writeHead(200, { "content-type": "application/json" });
+    if (req.url === "/v1/capabilities") {
+      const raw = readFileSync(cfgPath, "utf8");
+      const approvalFor = (id) => (new RegExp(`\\[harness\\.overrides\\."${id.replace(/\//g, "\\/")}"\\]\\napproved = true`).test(raw) ? "approved" : "pending");
+      res.end(
+        JSON.stringify({
+          applied: [{ id: "a/model" }, { id: "b/model" }],
+          records: [
+            { id: "a/model", approval: approvalFor("a/model") }, // live, never opined -> grandfather
+            { id: "b/model", approval: approvalFor("b/model") }, // live, never opined -> grandfather
+            { id: "c/model", approval: "pending" }, // pending but NOT live -> leave alone
+          ],
+          pending_ops: [],
+        }),
+      );
+    } else {
+      res.end(JSON.stringify({}));
+    }
+  });
+  await new Promise((r) => stub.listen(0, "127.0.0.1", r));
+  process.env.YM_ROUTER_URL = `http://127.0.0.1:${stub.address().port}`;
+
+  const { createConsoleServer } = await import(`../src/server.mjs?approve-live`);
+  const srv = createConsoleServer();
+  await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+  const base = `http://127.0.0.1:${srv.address().port}`;
+  t.after(() => {
+    srv.close();
+    stub.close();
+    rmSync(dir, { recursive: true, force: true });
+    delete process.env.YM_ROUTER_URL;
+  });
+
+  const r = await (await fetch(`${base}/api/capabilities/approve-live`, { method: "POST" })).json();
+  assert.equal(r.written, true, JSON.stringify(r));
+  assert.deepEqual(r.approved.sort(), ["a/model", "b/model"]);
+  const raw = readFileSync(cfgPath, "utf8");
+  assert.match(raw, /\[harness\.overrides\."a\/model"\]\napproved = true/);
+  assert.match(raw, /\[harness\.overrides\."b\/model"\]\napproved = true/);
+  assert.doesNotMatch(raw, /\[harness\.overrides\."c\/model"\]/, "not in the applied set — no override written for it");
+
+  // Nothing left to grandfather on a second call.
+  const r2 = await (await fetch(`${base}/api/capabilities/approve-live`, { method: "POST" })).json();
+  assert.equal(r2.written, false);
+  assert.deepEqual(r2.approved, []);
+});

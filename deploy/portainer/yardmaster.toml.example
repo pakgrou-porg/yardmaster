@@ -142,9 +142,28 @@ target = "local_r1_32b"
 #                                        # listing check — costs real money on paid
 #                                        # providers, so it's off unless you turn it on.
 # smoke_test_interval_s = 3600          # re-test at most this often per model
+# require_approval = false              # opt-in (ADR-0028 P4): curate instead of
+#                                        # auto-include — a model only ever goes live
+#                                        # (dsh, and the router's own /v1/models) once
+#                                        # you Approve it in the Console's Capabilities
+#                                        # tab (or set overrides."<id>".approved = true
+#                                        # here by hand). Off by default: newly
+#                                        # discovered/validated models are included
+#                                        # automatically, the pre-P4 behavior. Turning
+#                                        # this on does NOT immediately pull your
+#                                        # current model list out from under dsh — an
+#                                        # un-opined-on id just holds its removal
+#                                        # pending, same as any other destructive
+#                                        # change — but click "Approve all currently
+#                                        # live" once in the Console right after
+#                                        # flipping this on to clear that queue in one
+#                                        # step instead of approving each by hand.
 #
 # [harness.overrides."qwen/qwen3.8-flash"]
 # enabled = true                        # wins over policy.deny_glob for this id
 # rank = 1                              # more preferred than the locality default
 # default = false                       # set true to force it as the default model
+# approved = true                       # only needed if [harness.policy] require_approval
+#                                        # is on; true admits it, false rejects it,
+#                                        # absent leaves it "pending" (never rendered)
 

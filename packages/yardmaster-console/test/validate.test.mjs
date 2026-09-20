@@ -194,6 +194,31 @@ smoke_test_interval_s = 0
   hasErr(r, "`harness.policy.smoke_test_interval_s` must be a positive integer");
 });
 
+test("[harness]: require_approval policy key and an approved override are accepted and type-checked", () => {
+  const ok1 = validateConfig(`
+schema_version = 1
+[targets]
+[targets.x]
+id = "local-model"
+[harness.policy]
+require_approval = true
+[harness.overrides."local-model"]
+approved = true
+`);
+  ok(ok1, "require_approval + approved override");
+
+  const bad = validateConfig(`
+schema_version = 1
+[targets]
+[harness.policy]
+require_approval = "yes"
+[harness.overrides.x]
+approved = "yes"
+`);
+  hasErr(bad, "`harness.policy.require_approval` must be a boolean");
+  hasErr(bad, "harness.overrides.\"x\".approved` must be a boolean");
+});
+
 test("[harness]: more than one override with default = true is a warning, not an error", () => {
   const r = validateConfig(`
 schema_version = 1

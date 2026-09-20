@@ -54,11 +54,12 @@ their intent is an *input* to the pipeline.
   "locality": "remote",                 // cluster | lan | remote
   "source": "declared" | "probed" | "both",
 
-  // --- lifecycle: three ORTHOGONAL axes, not a linear state machine ---
+  // --- lifecycle: four ORTHOGONAL axes, not a linear state machine ---
   "reachability": "discovered" | "validated" | "unreachable",
   "reachability_checked_ms": 1788976000000,
   "policy": "enabled" | "disabled",
   "policy_reason": "allow_remote=false" | "deny glob" | "operator override" | null,
+  "approval": "not_required" | "pending" | "approved" | "rejected",  // P4, opt-in curation gate
   "rank": 20 | null,                    // lower = more preferred; null = unranked
   "default": false,                     // exactly one true across the registry
 
@@ -81,6 +82,16 @@ their intent is an *input* to the pipeline.
 - **"preferred"** is just `rank != null`; **"default"** is the single `default:
   true`. `enabled`/`disabled` is the policy verdict and is independent of
   reachability.
+- **"approval"** (P4) is independent of both: `policy = enabled` only says
+  nothing *disabled* it; `approval` says whether a human has ever *curated*
+  it. `not_required` — `[harness.policy] require_approval` is off (the
+  default; preserves P1's original auto-apply-additive behavior) or the
+  record isn't a routable target at all. `pending` — `require_approval` is
+  on and the operator has never set `[harness.overrides.<id>].approved`.
+  `approved` / `rejected` — that override is `true` / `false`. Only
+  `not_required` and `approved` are eligible for render or default selection;
+  `pending` and `rejected` are excluded, same treatment as `policy =
+  disabled`, just a different reason surfaced in the Console.
 
 ### Pipeline stages (pure, ordered, idempotent)
 
@@ -91,12 +102,19 @@ their intent is an *input* to the pipeline.
 4. **policy** — apply `[harness.policy]` rules (deny globs, min context,
    locality gates keyed off `[egress]`, rank-by-locality) then
    `[harness.overrides]` (which win) → `policy`, `policy_reason`, `rank`.
+4b. **approval** (P4, opt-in) — if `[harness.policy] require_approval = true`,
+    every routable id needs an explicit `[harness.overrides.<id>].approved`
+    (true or false) before it can be rendered or chosen as default; absent an
+    override, it's `pending`. Off by default — a no-op that leaves every
+    record `not_required`, identical to pre-P4 behavior.
 5. **select** — resolve exactly one `default`: `[harness.default_model]` if set
-   and enabled, else the id of `[routes.default].target`, else the
-   highest-ranked enabled `locality = lan|cluster` model.
+   and enabled *and approved*, else the id of `[routes.default].target` (same
+   condition), else the highest-ranked enabled-and-approved
+   `locality = lan|cluster` model.
 6. **render** — deterministic dsh fragment: `llm-pi-ai` `providers.yardmaster.models[]`
-   from `policy = enabled && reachability = validated`, sorted by `(rank, id)`;
-   `agent-default-model` = the default. Stable formatting; compute `managed_hash`.
+   from `policy = enabled && approval != pending|rejected && reachability =
+   validated`, sorted by `(rank, id)`; `agent-default-model` = the default.
+   Stable formatting; compute `managed_hash`.
 7. **plan** — diff the rendered fragment vs the current managed region → a list
    of add / remove / change ops. Empty plan ⇒ no write.
 8. **apply** — atomic: write `cordis.patch.yml.next`, gate on
@@ -105,12 +123,18 @@ their intent is an *input* to the pipeline.
 
    **Auto-apply is additive-only.** On a reconcile the pipeline applies, without
    approval:
-   - adding a newly-`validated` model to the rendered list;
+   - adding a newly-`validated` model to the rendered list (P4: only once
+     it's also past the *approval* axis — see stage 4b; with
+     `require_approval` off this is unconditional, the original behavior);
    - refreshing metadata (`context_window`, `capabilities`, `pricing`) on an
      entry that stays present;
    - any change whose cause is an operator edit to `[harness.overrides]` /
      `[harness.policy]` / `[targets.*]` — the edit *is* the approval, including
-     `enabled = false` and a new `default`.
+     `enabled = false` and a new `default`. An `approved = true` override is
+     exactly this case: it's additive (the id enters `desired.entries` for
+     the first time) and an explicit operator edit, so it applies immediately
+     on the next reconcile — no separate "apply" step beyond writing the
+     override, same as flipping `enabled`.
 
    It does **not** auto-apply, and instead records the op in the pending plan
    for `POST /v1/capabilities/apply` (or the Console P2 button):
@@ -257,3 +281,41 @@ profile scaffold exists and tolerates an absent region on first boot.
     (`probeCapabilitySources`'s OpenRouter-style `pricing.prompt`/
     `completion` × 1e6 → USD/Mtok); P3 just started surfacing it on
     `/v1/models` too rather than only `/v1/capabilities`.
+- **P4** — opt-in curation: a model only ever goes live once a human approves
+  it, instead of P1's auto-apply-additive default. **Done**:
+  - `approval` — the fourth orthogonal axis on `Capability` (see the schema
+    and stage 4b above). `applyApproval()` (`capabilities.mjs`), gated on
+    `[harness.policy] require_approval` (default `false` — every existing
+    deployment keeps P1's behavior unless it opts in). `desiredEntries()` and
+    `selectDefault()` both exclude `pending`/`rejected` ids from render and
+    default selection; `smokeTestCapabilities()` skips them too (no point
+    spending real money smoke-testing a model that can't be applied yet).
+  - No new router write path: a curation decision is
+    `[harness.overrides.<id>].approved` (`true`/`false`), the exact same
+    override table `enabled`/`rank`/`default` already use — an approval *is*
+    an operator edit, so it's additive and applies on the very next
+    reconcile with no separate confirmation step, consistent with every
+    other override-driven change in this pipeline.
+  - Console Capabilities tab: an "awaiting approval" queue (distinct from the
+    `pending_ops` list — that one is about already-computed removals/default
+    changes being held, this one is about new ids nobody has curated yet),
+    Approve/Reject buttons there and inline in the main table, a "Require
+    approval for new models" toggle (`POST /api/capabilities/policy` ->
+    `upsertHarnessPolicy()`, a new sibling to `upsertHarnessOverride()` in
+    `toml-overrides.mjs`, same surgical line-based editor applied to
+    `[harness.policy]` instead of a per-id table), and an "Approve all
+    currently live" bulk action (`POST /api/capabilities/approve-live`) — so
+    turning `require_approval` on doesn't strand an existing deployment's
+    model list in "pending" one-by-one; it grandfathers everything already
+    in the registry's *applied* set with a single write, and only models
+    discovered *after* that point actually need a fresh approval.
+  - `capabilityModelList()` (the `/v1/models` + `/api/tags` projection, P3)
+    had a latent bug this phase surfaced: its "fall back to the raw
+    declared-target list" path keyed off `appliedEntries.length === 0`,
+    conflating "the pipeline hasn't reconciled yet" (the actual intent — a
+    brief window right after boot) with "the pipeline reconciled and the
+    applied set is legitimately empty" — which `require_approval` with
+    nothing approved yet makes a real, sustained state for the first time.
+    Fixed to key off `lastReconcileMs === 0` instead, so a deliberately empty
+    approved set now correctly projects as empty rather than silently
+    falling back to every declared target regardless of curation.

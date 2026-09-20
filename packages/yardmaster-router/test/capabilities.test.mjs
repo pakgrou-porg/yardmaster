@@ -13,6 +13,7 @@ import {
   discover,
   applyProbeResults,
   applyPolicy,
+  applyApproval,
   selectDefault,
   desiredEntries,
   renderRegion,
@@ -154,6 +155,107 @@ test("applyPolicy: min_context_window disables without an override", () => {
   records = applyPolicy(records, harnessCfg);
   assert.equal(records.get("llama3.2:latest").policy, "disabled");
   assert.equal(records.get("llama3.2:latest").policy_reason, "policy: min_context_window");
+});
+
+test("applyApproval: off by default — every routable record is not_required regardless of overrides", () => {
+  const config = parseConfig(CFG);
+  let records = discover(config);
+  records = applyProbeResults(records, baseProbeMap());
+  const harnessCfg = parseHarnessConfig({ harness: { overrides: { "llama3.2:latest": { enabled: false } } } });
+  records = applyPolicy(records, harnessCfg);
+  records = applyApproval(records, harnessCfg);
+  for (const rec of records.values()) {
+    if (rec.target) assert.equal(rec.approval, "not_required", rec.id);
+  }
+});
+
+test("applyApproval: require_approval=true leaves un-opined ids pending; an explicit approved override wins", () => {
+  const config = parseConfig(CFG);
+  let records = discover(config);
+  records = applyProbeResults(records, baseProbeMap());
+  const harnessCfg = parseHarnessConfig({
+    harness: {
+      policy: { require_approval: true },
+      overrides: {
+        "llama3.2:latest": { approved: true },
+        "vendor/free-model": { approved: false },
+      },
+    },
+  });
+  records = applyPolicy(records, harnessCfg);
+  records = applyApproval(records, harnessCfg);
+  assert.equal(records.get("llama3.2:latest").approval, "approved");
+  assert.equal(records.get("vendor/free-model").approval, "rejected");
+  assert.equal(records.get("deepseek-r1:32b").approval, "pending", "no override at all -> pending, not silently included");
+  assert.equal(records.get("vendor/pro-model").approval, "pending");
+  // probed-only (no target) records are never gated — approval is moot for them.
+  const probeMap = baseProbeMap();
+  probeMap.get("openrouter").models.set("vendor/undeclared", { context_length: 1, pricing: null });
+  records = applyApproval(applyPolicy(applyProbeResults(discover(config), probeMap), harnessCfg), harnessCfg);
+  assert.equal(records.get("vendor/undeclared").approval, "not_required");
+});
+
+test("desiredEntries: a pending or rejected id is excluded from the render even though policy=enabled and reachability=validated", () => {
+  const config = parseConfig(CFG);
+  const harnessCfg = parseHarnessConfig({
+    harness: {
+      policy: { require_approval: true },
+      overrides: { "llama3.2:latest": { approved: true }, "vendor/free-model": { approved: false } },
+    },
+  });
+  let records = applyApproval(applyPolicy(applyProbeResults(discover(config), baseProbeMap()), harnessCfg), harnessCfg);
+  const ids = desiredEntries(records).map((e) => e.id);
+  assert.deepEqual(ids, ["llama3.2:latest"], "only the explicitly-approved id renders; pending/rejected/never-opined stay out");
+});
+
+test("selectDefault: require_approval blocks a pending id from being chosen even via an explicit override/default_model/routes.default", () => {
+  const config = parseConfig(CFG);
+  const build = (harnessRaw) => {
+    let records = discover(config);
+    records = applyProbeResults(records, baseProbeMap());
+    const harnessCfg = parseHarnessConfig({ harness: { policy: { require_approval: true }, ...harnessRaw } });
+    records = applyPolicy(records, harnessCfg);
+    records = applyApproval(records, harnessCfg);
+    return { records, harnessCfg };
+  };
+  // routes.default targets "big" (deepseek-r1:32b), never approved -> held back, no candidate at all.
+  {
+    const { records, harnessCfg } = build({});
+    const d = selectDefault(records, config, harnessCfg);
+    assert.equal(d, null, "nothing is approved yet, so there is no eligible default");
+  }
+  // an override default:true on a still-pending id is not enough by itself...
+  {
+    const { records, harnessCfg } = build({ overrides: { "deepseek-r1:32b": { default: true } } });
+    const d = selectDefault(records, config, harnessCfg);
+    assert.equal(d, null);
+  }
+  // ...but once that same id is also approved, it wins immediately.
+  {
+    const { records, harnessCfg } = build({ overrides: { "deepseek-r1:32b": { default: true, approved: true } } });
+    const d = selectDefault(records, config, harnessCfg);
+    assert.equal(d.id, "deepseek-r1:32b");
+    assert.equal(d.source, "override");
+  }
+});
+
+test("runPipeline: require_approval=true holds every model out until approved, then an approve-and-reconcile brings it in additively", () => {
+  const config = parseConfig(CFG);
+  const harnessCfg1 = parseHarnessConfig({ harness: { policy: { require_approval: true } } });
+  const r1 = runPipeline(config, baseProbeMap(), harnessCfg1, null);
+  assert.equal(r1.desired.entries.length, 0, "nothing pre-approved -> nothing desired");
+  assert.equal(r1.plan.appliedEntries.length, 0);
+  assert.equal(r1.plan.pendingOps.length, 0, "nothing was ever applied, so there is nothing to remove either");
+
+  // the operator approves one model (the Console's Approve button writes
+  // exactly this override) and reconciles again.
+  const harnessCfg2 = parseHarnessConfig({
+    harness: { policy: { require_approval: true }, overrides: { "llama3.2:latest": { approved: true } } },
+  });
+  const r2 = runPipeline(config, baseProbeMap(), harnessCfg2, { entries: r1.plan.appliedEntries, defaultId: r1.plan.appliedDefaultId });
+  assert.deepEqual(r2.desired.entries.map((e) => e.id), ["llama3.2:latest"]);
+  assert.deepEqual(r2.plan.appliedEntries.map((e) => e.id), ["llama3.2:latest"], "an approval is additive, applies immediately");
+  assert.equal(r2.plan.pendingOps.length, 0);
 });
 
 test("selectDefault: override default:true > harness.default_model > routes.default > best-local", () => {
