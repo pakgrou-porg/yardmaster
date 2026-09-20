@@ -111,7 +111,7 @@
         "@types/react-dom": "^19.3.0",
         "@vitejs/plugin-react": "^5.2.0",
         "@vitest/coverage-v8": "^5.0.0",
-        "electron": "^42.9.3",
+        "electron": "^44.4.1",
         "electron-builder": "^26.15.3",
         "electron-vite": "^5.0.0",
         "eslint": "^9.23.0",
