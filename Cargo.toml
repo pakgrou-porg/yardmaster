@@ -84,7 +84,7 @@ toml = "0.8"
 tracing = { version = "0.1", default-features = false, features = ["attributes", "std"] }
 tracing-opentelemetry = "0.28"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-x509-parser = "0.16"
+x509-parser = "0.18"
 
 [profile.release]
 lto = "thin"
