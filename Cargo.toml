@@ -72,7 +72,7 @@ parking_lot = "0.12"
 prometheus = "0.14" # 0.13 pulls protobuf 2.x (RUSTSEC-2024-0437); 0.14 requires protobuf >=3.7.2
 rand = "0.10"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "stream"] }
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
