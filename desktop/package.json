@@ -126,7 +126,7 @@
         "tsx": "^4.23.13",
         "typescript": "^5.8.2",
         "vite": "^7.3.6",
-        "vitest": "^5.0.0"
+        "vitest": "^5.0.1"
     },
     "overrides": {
         "dompurify": "^3.4.13"
