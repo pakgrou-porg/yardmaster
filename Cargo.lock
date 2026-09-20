@@ -3537,7 +3537,7 @@ name = "yardmaster-metrics"
 version = "0.1.0"
 dependencies = [
  "clap",
- "opentelemetry 0.27.1",
+ "opentelemetry 0.32.0",
  "opentelemetry-otlp 0.27.0",
  "opentelemetry_sdk 0.32.1",
  "parking_lot",
