@@ -394,7 +394,8 @@ test("server: /api/capabilities/approve-live grandfathers the currently-applied 
     res.writeHead(200, { "content-type": "application/json" });
     if (req.url === "/v1/capabilities") {
       const raw = readFileSync(cfgPath, "utf8");
-      const approvalFor = (id) => (new RegExp(`\\[harness\\.overrides\\."${id.replace(/\//g, "\\/")}"\\]\\napproved = true`).test(raw) ? "approved" : "pending");
+      const escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const approvalFor = (id) => (new RegExp(`\\[harness\\.overrides\\."${escapeRegExp(id)}"\\]\\napproved = true`).test(raw) ? "approved" : "pending");
       res.end(
         JSON.stringify({
           applied: [{ id: "a/model" }, { id: "b/model" }],

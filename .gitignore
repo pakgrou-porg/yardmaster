@@ -29,6 +29,7 @@ yardmaster.toml
 *.local.toml
 .env
 .env.*
+!deploy/portainer/.env.example
 secrets/
 
 # Build / release artifacts
