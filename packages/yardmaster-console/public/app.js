@@ -3,7 +3,8 @@
 
 const $ = (s) => document.querySelector(s);
 const api = (p, opt) => fetch(p, opt).then((r) => r.json());
-const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+const esc = (s) =>
+  String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const ms = (n) => (n == null ? "—" : `${Math.round(n)} ms`);
 const usd = (n) => `$${(n || 0).toFixed(4)}`;
 
@@ -89,6 +90,14 @@ function policyPill(p, reason) {
   const cls = p === "enabled" ? "up" : "down";
   return `<span class="pill ${cls}" title="${esc(reason || "")}">${esc(p)}</span>`;
 }
+// "not_required" (require_approval is off, or this record isn't a target at
+// all) renders as a plain dash — showing a pill for the common case would be
+// noise; "pending"/"approved"/"rejected" are the states worth calling out.
+function approvalPill(a) {
+  if (!a || a === "not_required") return `<span class="dim">—</span>`;
+  const cls = a === "approved" ? "up" : a === "rejected" ? "down" : "warn";
+  return `<span class="pill ${cls}">${esc(a)}</span>`;
+}
 async function overrideAction(id, patch) {
   const r = await api("/api/capabilities/override", { method: "POST", body: JSON.stringify({ id, patch }) });
   if (!r.written) alert(`Not saved: ${(r.errors || []).join("; ") || "unknown error"}`);
@@ -99,10 +108,12 @@ async function refreshCapabilities() {
   if (!d.available) {
     $("#cap-note").textContent = d.note || "router unreachable";
     $("#cap-pending").innerHTML = "";
+    $("#cap-approval-queue").innerHTML = "";
     $("#cap-list").innerHTML = `<p class="dim">Set YM_DATAPLANE_MODE=router on the yardmaster service to enable this.</p>`;
     return;
   }
   $("#cap-note").textContent = d.last_error ? `last reconcile error: ${d.last_error}` : "";
+  $("#cap-require-approval").checked = !!d.require_approval;
 
   const pending = d.pending_ops || [];
   $("#cap-pending").innerHTML = pending.length
@@ -118,20 +129,56 @@ async function refreshCapabilities() {
     await refreshCapabilities();
   });
 
+  // Approval queue (ADR-0028 P4): newly-discovered/validated models awaiting
+  // a curation decision — distinct from `pending_ops` above, which is about
+  // already-computed removals/default-changes held back, not new inclusions.
+  const awaiting = (d.records || []).filter((r) => r.approval === "pending");
+  $("#cap-approval-queue").innerHTML = awaiting.length
+    ? `<div class="bar"><span class="msg warn">${awaiting.length} model(s) awaiting approval</span></div>` +
+      `<table><tr><th>id</th><th>provider</th><th>locality</th><th>reachability</th><th>context</th><th></th></tr>` +
+      awaiting
+        .map(
+          (r) =>
+            `<tr><td>${esc(r.id)}</td><td class="dim">${esc(r.provider)}</td><td class="dim">${esc(r.locality ?? "—")}</td>` +
+            `<td>${reachPill(r.reachability)}</td><td class="dim">${r.context_window ? r.context_window.toLocaleString() : "—"}</td>` +
+            `<td><button data-approve="${esc(r.id)}" class="primary">Approve</button>` +
+            `<button data-reject="${esc(r.id)}">Reject</button></td></tr>`,
+        )
+        .join("") +
+      `</table>`
+    : "";
+  $("#cap-approval-queue").querySelectorAll("button[data-approve]").forEach((b) =>
+    b.addEventListener("click", () => overrideAction(b.dataset.approve, { approved: true })),
+  );
+  $("#cap-approval-queue").querySelectorAll("button[data-reject]").forEach((b) =>
+    b.addEventListener("click", () => overrideAction(b.dataset.reject, { approved: false })),
+  );
+
   const rows = [...(d.records || [])].sort((a, b) => (a.rank ?? 1e9) - (b.rank ?? 1e9) || a.id.localeCompare(b.id));
   $("#cap-list").innerHTML =
     `<table><tr><th>id</th><th>provider</th><th>locality</th><th>reachability</th><th>policy</th>` +
-    `<th>rank</th><th>default</th><th></th></tr>` +
+    `<th>approval</th><th>rank</th><th>default</th><th></th></tr>` +
     rows
       .map((r) => {
         const enabled = r.policy === "enabled";
-        const actions = r.target
-          ? `<button data-act="toggle" data-id="${esc(r.id)}" data-enabled="${enabled}">${enabled ? "Disable" : "Enable"}</button>` +
-            (r.default ? "" : `<button data-act="default" data-id="${esc(r.id)}">Set default</button>`)
-          : `<span class="dim">not a target</span>`;
+        let actions = "";
+        if (r.target) {
+          actions += `<button data-act="toggle" data-id="${esc(r.id)}" data-enabled="${enabled}">${enabled ? "Disable" : "Enable"}</button>`;
+          if (!r.default) actions += `<button data-act="default" data-id="${esc(r.id)}">Set default</button>`;
+          if (r.approval === "pending") {
+            actions += `<button data-act="approve" data-id="${esc(r.id)}">Approve</button><button data-act="reject" data-id="${esc(r.id)}">Reject</button>`;
+          } else if (r.approval === "approved") {
+            actions += `<button data-act="reject" data-id="${esc(r.id)}">Reject</button>`;
+          } else if (r.approval === "rejected") {
+            actions += `<button data-act="approve" data-id="${esc(r.id)}">Approve</button>`;
+          }
+        } else {
+          actions = `<span class="dim">not a target</span>`;
+        }
         return (
           `<tr><td>${esc(r.id)}</td><td class="dim">${esc(r.provider)}</td><td class="dim">${esc(r.locality ?? "—")}</td>` +
           `<td>${reachPill(r.reachability)}</td><td>${policyPill(r.policy, r.policy_reason)}</td>` +
+          `<td>${approvalPill(r.approval)}</td>` +
           `<td class="dim">${r.rank ?? "—"}</td><td>${r.default ? "✓" : ""}</td><td>${actions}</td></tr>`
         );
       })
@@ -141,13 +188,30 @@ async function refreshCapabilities() {
     b.addEventListener("click", () => {
       const id = b.dataset.id;
       if (b.dataset.act === "toggle") overrideAction(id, { enabled: b.dataset.enabled !== "true" });
-      else overrideAction(id, { default: true });
+      else if (b.dataset.act === "default") overrideAction(id, { default: true });
+      else if (b.dataset.act === "approve") overrideAction(id, { approved: true });
+      else if (b.dataset.act === "reject") overrideAction(id, { approved: false });
     }),
   );
 }
 $("#cap-refresh").addEventListener("click", refreshCapabilities);
 $("#cap-reconcile").addEventListener("click", async () => {
   await api("/api/capabilities/reconcile", { method: "POST" });
+  await refreshCapabilities();
+});
+$("#cap-require-approval").addEventListener("change", async (e) => {
+  const r = await api("/api/capabilities/policy", { method: "POST", body: JSON.stringify({ patch: { require_approval: e.target.checked } }) });
+  if (!r.written) {
+    alert(`Not saved: ${(r.errors || []).join("; ") || "unknown error"}`);
+    e.target.checked = !e.target.checked; // reflect the actual on-disk state, not the failed click
+  }
+  await refreshCapabilities();
+});
+$("#cap-approve-live").addEventListener("click", async () => {
+  const r = await api("/api/capabilities/approve-live", { method: "POST" });
+  if (r.error) alert(`Failed: ${r.error}`);
+  else if (r.approved?.length) alert(`Approved ${r.approved.length} currently-live model(s): ${r.approved.join(", ")}`);
+  else alert("Nothing needed grandfathering.");
   await refreshCapabilities();
 });
 

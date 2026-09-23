@@ -11,9 +11,10 @@
  * `cordis.patch.yml` that it owns exclusively — everything else in that file,
  * including a hand-written `cordis.user.yml` append, is untouched.
  *
- * Pipeline: discover -> normalize+probe -> policy -> select(default) ->
- * render -> plan (additive-only apply, destructive ops held) -> write (gated
- * by `dsh --dump-config`, self-heals from a `.lkg` snapshot on failure).
+ * Pipeline: discover -> normalize+probe -> policy -> approval (P4, opt-in
+ * curation gate) -> select(default) -> render -> plan (additive-only apply,
+ * destructive ops held) -> write (gated by `dsh --dump-config`, self-heals
+ * from a `.lkg` snapshot on failure).
  *
  * Every stage up to `planApply` is pure and unit-tested without touching a
  * filesystem or network; `probeCapabilitySources` and `writeManagedRegion` are
@@ -112,6 +113,11 @@ export function discover(config) {
       smoke_test_error: null,
       policy: "enabled",
       policy_reason: null,
+      // Fourth orthogonal axis (P4): "not_required" | "pending" | "approved" |
+      // "rejected" — set by applyApproval() once [harness.overrides] is known.
+      // Left "not_required" here so a record inspected before that stage
+      // still has the field (discover() has no access to harnessCfg).
+      approval: "not_required",
       rank: null,
       default: false,
     });
@@ -165,6 +171,10 @@ export function applyProbeResults(records, probeMap) {
         smoke_test_error: null,
         policy: "disabled",
         policy_reason: "not declared as a target",
+        // Never routable (no target) — approval is moot; applyApproval()
+        // leaves it "not_required" too, this just avoids a null in the
+        // window before that stage runs.
+        approval: "not_required",
         rank: null,
         default: false,
       });
@@ -222,6 +232,43 @@ export function applyPolicy(records, harnessCfg) {
 }
 
 // ---------------------------------------------------------------------------
+// Stage 4b — approval (P4): a curation gate independent of `policy`. Opt-in
+// ([harness.policy] require_approval = true, default false — preserves the
+// original auto-apply-additive behavior). When on, every routable id needs
+// an explicit `[harness.overrides.<id>].approved` (true or false) before it
+// can ever be rendered to dsh or chosen as default; the Console's Capabilities
+// tab writes that key via the same override-upsert path Enable/Disable and
+// Set default already use. An id an operator has never opined on sits
+// "pending" — visible in the registry, excluded from the render — until
+// approved or rejected. Once set, the override persists the decision across
+// reconciles (discover() rebuilds fresh records every cycle; the override is
+// what remembers).
+// ---------------------------------------------------------------------------
+
+export function applyApproval(records, harnessCfg) {
+  const requireApproval = harnessCfg.policy?.require_approval === true;
+  for (const rec of records.values()) {
+    if (!rec.target) {
+      rec.approval = "not_required"; // probed-only: never routable, approval is moot
+      continue;
+    }
+    const ov = harnessCfg.overrides[rec.id];
+    if (ov && typeof ov.approved === "boolean") {
+      rec.approval = ov.approved ? "approved" : "rejected";
+      continue;
+    }
+    rec.approval = requireApproval ? "pending" : "not_required";
+  }
+  return records;
+}
+
+/** True unless a curation decision (or its absence) blocks this id from being
+ * rendered/selected — i.e. everything except "pending" and "rejected". */
+function approvalOk(rec) {
+  return rec.approval !== "pending" && rec.approval !== "rejected";
+}
+
+// ---------------------------------------------------------------------------
 // Stage 5 — select: exactly one default. `source` tells the apply stage
 // whether this was an explicit operator choice (auto-applies) or the
 // pipeline's own fallback guess (held for approval if it changes).
@@ -229,19 +276,20 @@ export function applyPolicy(records, harnessCfg) {
 
 export function selectDefault(records, config, harnessCfg) {
   for (const rec of records.values()) rec.default = false;
-  const enabledRoutable = () => [...records.values()].filter((r) => r.target && r.policy === "enabled");
+  const routable = (r) => r.target && r.policy === "enabled" && approvalOk(r);
+  const enabledRoutable = () => [...records.values()].filter(routable);
 
   const overrideDefault = Object.entries(harnessCfg.overrides).find(([, ov]) => ov && ov.default === true);
   if (overrideDefault) {
     const rec = records.get(overrideDefault[0]);
-    if (rec && rec.policy === "enabled") {
+    if (rec && routable(rec)) {
       rec.default = true;
       return { id: rec.id, source: "override" };
     }
   }
   if (harnessCfg.defaultModel) {
     const rec = records.get(harnessCfg.defaultModel);
-    if (rec && rec.policy === "enabled") {
+    if (rec && routable(rec)) {
       rec.default = true;
       return { id: rec.id, source: "harness.default_model" };
     }
@@ -250,7 +298,7 @@ export function selectDefault(records, config, harnessCfg) {
   if (dr && dr.target && config.targets[dr.target]) {
     const id = config.targets[dr.target].id;
     const rec = records.get(id);
-    if (rec && rec.policy === "enabled") {
+    if (rec && routable(rec)) {
       rec.default = true;
       return { id: rec.id, source: "routes.default" };
     }
@@ -274,7 +322,13 @@ export function selectDefault(records, config, harnessCfg) {
 
 export function desiredEntries(records) {
   return [...records.values()]
-    .filter((r) => r.target && r.policy === "enabled" && (r.reachability === "validated" || r.reachability === "smoke_tested"))
+    .filter(
+      (r) =>
+        r.target &&
+        r.policy === "enabled" &&
+        approvalOk(r) &&
+        (r.reachability === "validated" || r.reachability === "smoke_tested"),
+    )
     .sort((a, b) => a.rank - b.rank || a.id.localeCompare(b.id))
     .map((r) => ({ id: r.id, contextWindow: Number.isFinite(r.context_window) ? r.context_window : undefined }));
 }
@@ -495,7 +549,8 @@ export async function smokeTestCapabilities(records, config, harnessCfg, { timeo
   const policy = harnessCfg.policy || {};
   if (policy.smoke_test !== true) return records;
   const intervalMs = Number.isFinite(policy.smoke_test_interval_s) ? policy.smoke_test_interval_s * 1000 : 3_600_000;
-  const eligible = (r) => r.target && r.policy === "enabled" && (r.reachability === "validated" || r.reachability === "smoke_tested");
+  const eligible = (r) =>
+    r.target && r.policy === "enabled" && approvalOk(r) && (r.reachability === "validated" || r.reachability === "smoke_tested");
 
   const jobs = [];
   for (const rec of records.values()) {
@@ -640,6 +695,7 @@ export function runPipeline(config, probeMap, harnessCfg, previousApplied) {
   let records = discover(config);
   records = applyProbeResults(records, probeMap);
   records = applyPolicy(records, harnessCfg);
+  records = applyApproval(records, harnessCfg);
   const defaultChoice = selectDefault(records, config, harnessCfg);
   const desired = {
     entries: desiredEntries(records),

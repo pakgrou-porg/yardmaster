@@ -31,7 +31,7 @@ th { color:var(--dim); font-weight:600; }
 .pill.up { color:var(--acc); border-color:var(--acc); }
 .pill.down { color:var(--err); border-color:var(--err); }
 .pill.warn { color:var(--warn); border-color:var(--warn); }
-#cap-list td button, #cap-pending button { margin-right:6px; }
+#cap-list td button, #cap-pending button, #cap-approval-queue td button { margin-right:6px; }
 #cap-pending ul { margin:6px 0 14px; padding-left:20px; color:var(--dim); }
 #cap-pending ul code { color:var(--fg); }
 .tiles { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; margin-bottom:14px; }

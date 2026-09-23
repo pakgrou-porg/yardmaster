@@ -47,18 +47,27 @@ SPDX-License-Identifier: Apache-2.0
         <div class="bar">
           <button id="cap-refresh">Refresh</button>
           <button id="cap-reconcile">Reconcile now</button>
+          <label><input type="checkbox" id="cap-require-approval" /> Require approval for new models</label>
+          <button id="cap-approve-live">Approve all currently live</button>
           <span id="cap-note" class="dim"></span>
         </div>
+        <div id="cap-approval-queue"></div>
         <div id="cap-pending"></div>
         <div id="cap-list"></div>
         <p class="dim">
           The Harness's model list is discovered from <code>[targets.*]</code>
           in <code>yardmaster.toml</code> (<a
             href="https://github.com/pakgrou-porg/yardmaster/blob/main/docs/decisions/0028-capability-registry-pipeline.md"
-            target="_blank" rel="noreferrer">ADR-0028</a>). Enable/disable and
-          Default here write to <code>[harness.overrides.&lt;id&gt;]</code> in
-          the config — they're operator edits, so they apply immediately, same
-          as editing the Config tab by hand and saving.
+            target="_blank" rel="noreferrer">ADR-0028</a>). Enable/disable,
+          Default, and Approve/Reject here write to
+          <code>[harness.overrides.&lt;id&gt;]</code> in the config — they're
+          operator edits, so they apply immediately, same as editing the
+          Config tab by hand and saving. With <b>Require approval for new
+          models</b> on, a model only ever goes live in dsh (or the router's
+          own <code>/v1/models</code>) once you explicitly Approve it — turn
+          it on, then click <b>Approve all currently live</b> once so your
+          existing model list doesn't disappear while you catch up on the
+          rest.
         </p>
       </section>
 

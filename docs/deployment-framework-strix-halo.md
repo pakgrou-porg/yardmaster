@@ -244,7 +244,11 @@ Then open **`http://127.0.0.1:8770`** in a browser, log in, and check:
   Enable/Disable and Set default write to `[harness.overrides]` in
   `yardmaster.toml` and apply immediately (they're operator edits); "Apply
   all" approves held changes the pipeline couldn't auto-apply on its own
-  (§7 above has the underlying `GET/POST /v1/capabilities*` detail).
+  (§7 above has the underlying `GET/POST /v1/capabilities*` detail). Flip
+  **Require approval for new models** on to curate instead of auto-include —
+  a discovered model only goes live once you click **Approve** on it; click
+  **Approve all currently live** right after turning this on so your
+  existing model list doesn't get held pending while you catch up.
 - **Agent** — the Harness embedded in an iframe (tokened URL, host-rewritten to
   match how you reached the Console). It is **also** at
   `http://<host>:3080` directly for a full-window session; both prompt for the

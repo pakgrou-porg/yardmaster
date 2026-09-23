@@ -107,6 +107,9 @@ let registry = {
   plan: { appliedEntries: [], appliedDefaultId: null, pendingOps: [] },
   lastReconcileMs: 0,
   lastError: null,
+  // [harness.policy] require_approval (P4) as of the last reconcile — surfaced
+  // on /v1/capabilities so the Console can reflect the toggle's live state.
+  requireApproval: false,
 };
 let previousApplied = existsSync(capCfg.patchPath) ? parseAppliedRegion(readFileSync(capCfg.patchPath, "utf8") || "") : null;
 const dshValidator = makeDshValidator({ dshBin: existsSync(capCfg.dshBin) ? capCfg.dshBin : null, dshHome: capCfg.dshHome });
@@ -169,7 +172,14 @@ async function reconcileNow() {
     // `plan` above are already final by this point, computed from
     // reachability "validated", which smoke_tested only ever upgrades from).
     await smokeTestCapabilities(records, config, harnessCfg, { timeoutMs: capCfg.smokeTestTimeoutMs, state: smokeTestState });
-    registry = { records, desired, plan, lastReconcileMs: Date.now(), lastError: null };
+    registry = {
+      records,
+      desired,
+      plan,
+      lastReconcileMs: Date.now(),
+      lastError: null,
+      requireApproval: harnessCfg.policy?.require_approval === true,
+    };
 
     if (!existsSync(capCfg.dshHome)) return; // no Harness volume mounted here — registry still computed, nothing to write
 
@@ -235,7 +245,13 @@ async function forceApplyPending() {
  * registry has run its first reconcile (a brief window right after boot).
  */
 function capabilityModelList() {
-  if (registry.plan.appliedEntries.length === 0) {
+  // Only fall back to the raw declared-target list in the brief window
+  // before the pipeline has ever run (lastReconcileMs === 0 — a fresh
+  // process's initial value). A *reconciled* but genuinely empty applied set
+  // (e.g. [harness.policy] require_approval = true and nothing approved yet)
+  // must project as empty, not silently fall back to "every declared target"
+  // — that would defeat the whole point of the approval gate.
+  if (registry.lastReconcileMs === 0) {
     return knownModels(config).map((id) => ({ id, object: "model", owned_by: "yardmaster" }));
   }
   return registry.plan.appliedEntries.map((e) => {
@@ -603,6 +619,7 @@ const server = createServer(async (req, res) => {
         pending_ops: registry.plan.pendingOps,
         last_reconcile_ms: registry.lastReconcileMs,
         last_error: registry.lastError,
+        require_approval: registry.requireApproval,
       });
     }
     if (p === "/v1/capabilities/reconcile" && req.method === "POST") {
