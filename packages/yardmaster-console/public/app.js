@@ -3,7 +3,8 @@
 
 const $ = (s) => document.querySelector(s);
 const api = (p, opt) => fetch(p, opt).then((r) => r.json());
-const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+const esc = (s) =>
+  String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const ms = (n) => (n == null ? "—" : `${Math.round(n)} ms`);
 const usd = (n) => `$${(n || 0).toFixed(4)}`;
 
