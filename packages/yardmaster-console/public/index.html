@@ -58,7 +58,14 @@ SPDX-License-Identifier: Apache-2.0
             target="_blank" rel="noreferrer">ADR-0028</a>). Enable/disable and
           Default here write to <code>[harness.overrides.&lt;id&gt;]</code> in
           the config — they're operator edits, so they apply immediately, same
-          as editing the Config tab by hand and saving.
+          as editing the Config tab by hand and saving. A row with no target
+          was only ever <em>discovered</em> via a provider probe, never
+          declared — pick a locality and click <strong>Set Target</strong> to
+          declare <code>[targets.&lt;key&gt;]</code> and make it
+          Enable/Disable-able. <strong>Unset Target</strong> removes that
+          declaration; unlike Enable/Disable it isn't instant — the model's
+          removal from the live list is held for <strong>Apply all</strong>,
+          same as any other non-override-driven removal.
         </p>
       </section>
 

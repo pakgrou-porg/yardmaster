@@ -242,6 +242,41 @@ test("planApply: additive add always applies; a policy-driven remove is held; an
   assert.equal(r2.pendingOps.length, 0);
 });
 
+test("planApply: a target dropped (policy_reason 'not declared as a target') is held, not auto-applied — Set/Unset Target (ADR-0028 P5) is deliberately asymmetric with Enable/Disable", () => {
+  const previous = { entries: [{ id: "a" }], defaultId: "a" };
+  const recordsById = new Map([
+    // "a"'s [targets.*] table was removed via Unset Target: applyProbeResults
+    // re-classifies it "probed" with this exact reason (capabilities.mjs),
+    // which is NOT "operator override" — so unlike an Enable/Disable-driven
+    // removal, it must be held for the operator to confirm via Apply all.
+    ["a", { policy: "disabled", policy_reason: "not declared as a target" }],
+  ]);
+  const desired = { entries: [], defaultId: null, defaultSource: null, recordsById };
+  const { appliedEntries, pendingOps } = planApply(previous, desired);
+  assert.deepEqual(appliedEntries.map((e) => e.id), ["a"], "held removal keeps it listed until Apply all");
+  assert.equal(pendingOps.length, 1);
+  assert.equal(pendingOps[0].type, "remove");
+  assert.equal(pendingOps[0].id, "a");
+});
+
+test("discover: a newly-declared [targets.*] entry for a previously-probed-only id needs no special-casing (Set Target, ADR-0028 P5)", () => {
+  // Same config as CFG plus one more declared target — simulating what
+  // upsertTarget() writes to yardmaster.toml when an operator clicks "Set
+  // Target" on a row that was previously source:"probed", target:null.
+  const cfgWithNewTarget = CFG.replace(
+    "[routes.default]",
+    `[targets.newly_set]\nid = "vendor/newly-discovered"\nlocality = "remote"\nprovider = "openrouter"\n[routes.default]`,
+  );
+  const config = parseConfig(cfgWithNewTarget);
+  const records = discover(config);
+  const rec = records.get("vendor/newly-discovered");
+  assert.equal(rec.target, "newly_set");
+  assert.equal(rec.source, "declared");
+  assert.equal(rec.provider, "openrouter");
+  assert.equal(rec.locality, "remote");
+  assert.equal(rec.policy, "enabled", "a freshly declared target starts enabled, same as any other");
+});
+
 test("planApply: default change from an explicit source auto-applies; a fallback-guess change is held", () => {
   const previous = { entries: [{ id: "a" }, { id: "b" }], defaultId: "a" };
   const recordsById = new Map([

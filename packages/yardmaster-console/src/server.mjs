@@ -20,6 +20,10 @@
  *   POST /api/capabilities/apply     proxy: approve every held (pending) op
  *   POST /api/capabilities/override  body: {id, patch} -> upsert [harness.overrides.<id>],
  *                                    validate, save (same gate as PUT /api/config)
+ *   POST /api/capabilities/target/set    body: {id, provider, locality} -> declare
+ *                                    [targets.<generated-key>], validate, save (ADR-0028 P5)
+ *   POST /api/capabilities/target/unset  body: {target} -> remove that [targets.<key>],
+ *                                    validate, save (ADR-0028 P5)
  *   GET  /  (and static assets)      the SPA
  *
  * Binds 127.0.0.1 by default. Set YM_CONSOLE_BIND=0.0.0.0 to serve the LAN; when
@@ -44,7 +48,7 @@ import { execFile } from "node:child_process";
 import { validateConfig } from "./validate.mjs";
 import { probeBackends } from "./backends.mjs";
 import { readMetrics } from "./metrics.mjs";
-import { upsertHarnessOverride } from "./toml-overrides.mjs";
+import { upsertHarnessOverride, generateTargetKey, upsertTarget, removeTarget } from "./toml-overrides.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PUBLIC = join(HERE, "..", "public");
@@ -404,6 +408,60 @@ async function handleApi(req, res, url) {
     }
     const { raw } = await loadConfig();
     const next = upsertHarnessOverride(raw, id, patch);
+    const r = await saveConfig(next);
+    return json(res, r.status, r.body);
+  }
+
+  // Declare a new target for a probed-but-undeclared model: {id, provider,
+  // locality} -> generates a target key, writes [targets.<key>], validate+
+  // save (ADR-0028 P5). `locality` is REQUIRED here — validateConfig
+  // silently defaults a missing locality to "cluster" with no warning,
+  // which would mislabel an actually remote/LAN model and break egress
+  // gating / locality-based ranking, so this endpoint enforces presence
+  // itself rather than leaning on the validate gate for it.
+  if (url.pathname === "/api/capabilities/target/set" && req.method === "POST") {
+    let body;
+    try {
+      body = JSON.parse(await readBody(req));
+    } catch {
+      return json(res, 400, { written: false, errors: ["invalid JSON body"] });
+    }
+    const id = String(body.id || "");
+    const provider = String(body.provider || "");
+    const locality = String(body.locality || "");
+    if (!id || !provider || !["cluster", "lan", "remote"].includes(locality)) {
+      return json(res, 400, {
+        written: false,
+        errors: ["body must be { id: string, provider: string, locality: cluster|lan|remote }"],
+      });
+    }
+    const { raw } = await loadConfig();
+    const key = generateTargetKey(raw, provider, id);
+    const next = upsertTarget(raw, key, { id, provider, locality });
+    const r = await saveConfig(next);
+    return json(res, r.status, { ...r.body, target: key });
+  }
+
+  // Undeclare a target: {target: "<the [targets.<key>] key>"} -> removes
+  // that table (ADR-0028 P5). Leaves any [harness.overrides.<id>] for the
+  // same model id in place — already a documented no-op in the capability
+  // pipeline for an id with no target. Note: the model's removal from the
+  // live list is NOT instant like Enable/Disable — dropping a target
+  // entirely (as opposed to an operator-override disable) fails the
+  // pipeline's additive-only auto-apply fast-path, so it surfaces as a
+  // held "remove" op for the operator to confirm via "Apply all".
+  if (url.pathname === "/api/capabilities/target/unset" && req.method === "POST") {
+    let body;
+    try {
+      body = JSON.parse(await readBody(req));
+    } catch {
+      return json(res, 400, { written: false, errors: ["invalid JSON body"] });
+    }
+    const key = String(body.target || "");
+    if (!key) return json(res, 400, { written: false, errors: ["body must be { target: string }"] });
+    const { raw } = await loadConfig();
+    const next = removeTarget(raw, key);
+    if (next === raw) return json(res, 400, { written: false, errors: [`no [targets.${key}] table found`] });
     const r = await saveConfig(next);
     return json(res, r.status, r.body);
   }

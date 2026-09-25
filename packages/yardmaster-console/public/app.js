@@ -3,7 +3,8 @@
 
 const $ = (s) => document.querySelector(s);
 const api = (p, opt) => fetch(p, opt).then((r) => r.json());
-const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+const esc = (s) =>
+  String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const ms = (n) => (n == null ? "—" : `${Math.round(n)} ms`);
 const usd = (n) => `$${(n || 0).toFixed(4)}`;
 
@@ -94,6 +95,22 @@ async function overrideAction(id, patch) {
   if (!r.written) alert(`Not saved: ${(r.errors || []).join("; ") || "unknown error"}`);
   await refreshCapabilities();
 }
+const LOCALITIES = ["cluster", "lan", "remote"];
+// Best-guess default for a new target's locality picker: the most common
+// locality among other already-declared targets on the same provider (they
+// share one in practice — see yardmaster.toml.example), else "lan".
+function defaultLocalityFor(provider, records) {
+  const counts = {};
+  for (const r of records) if (r.target && r.provider === provider && r.locality) counts[r.locality] = (counts[r.locality] || 0) + 1;
+  let best = null, bestN = 0;
+  for (const l of LOCALITIES) if ((counts[l] || 0) > bestN) [best, bestN] = [l, counts[l]];
+  return best || "lan";
+}
+async function targetAction(path, body) {
+  const r = await api(path, { method: "POST", body: JSON.stringify(body) });
+  if (!r.written) alert(`Not saved: ${(r.errors || []).join("; ") || "unknown error"}`);
+  await refreshCapabilities();
+}
 async function refreshCapabilities() {
   const d = await api("/api/capabilities");
   if (!d.available) {
@@ -127,8 +144,11 @@ async function refreshCapabilities() {
         const enabled = r.policy === "enabled";
         const actions = r.target
           ? `<button data-act="toggle" data-id="${esc(r.id)}" data-enabled="${enabled}">${enabled ? "Disable" : "Enable"}</button>` +
-            (r.default ? "" : `<button data-act="default" data-id="${esc(r.id)}">Set default</button>`)
-          : `<span class="dim">not a target</span>`;
+            (r.default ? "" : `<button data-act="default" data-id="${esc(r.id)}">Set default</button>`) +
+            `<button data-act="unset-target" data-id="${esc(r.id)}" data-target="${esc(r.target)}">Unset Target</button>`
+          : `<select data-locality>` +
+            LOCALITIES.map((l) => `<option value="${l}"${l === defaultLocalityFor(r.provider, d.records || []) ? " selected" : ""}>${l}</option>`).join("") +
+            `</select> <button data-act="set-target" data-id="${esc(r.id)}" data-provider="${esc(r.provider)}">Set Target</button>`;
         return (
           `<tr><td>${esc(r.id)}</td><td class="dim">${esc(r.provider)}</td><td class="dim">${esc(r.locality ?? "—")}</td>` +
           `<td>${reachPill(r.reachability)}</td><td>${policyPill(r.policy, r.policy_reason)}</td>` +
@@ -141,7 +161,15 @@ async function refreshCapabilities() {
     b.addEventListener("click", () => {
       const id = b.dataset.id;
       if (b.dataset.act === "toggle") overrideAction(id, { enabled: b.dataset.enabled !== "true" });
-      else overrideAction(id, { default: true });
+      else if (b.dataset.act === "default") overrideAction(id, { default: true });
+      else if (b.dataset.act === "set-target") {
+        b.disabled = true;
+        const locality = b.closest("tr").querySelector("select[data-locality]").value;
+        targetAction("/api/capabilities/target/set", { id, provider: b.dataset.provider, locality });
+      } else if (b.dataset.act === "unset-target") {
+        b.disabled = true;
+        targetAction("/api/capabilities/target/unset", { target: b.dataset.target });
+      }
     }),
   );
 }
