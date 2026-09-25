@@ -257,3 +257,45 @@ profile scaffold exists and tolerates an absent region on first boot.
     (`probeCapabilitySources`'s OpenRouter-style `pricing.prompt`/
     `completion` × 1e6 → USD/Mtok); P3 just started surfacing it on
     `/v1/models` too rather than only `/v1/capabilities`.
+- **P5** — Console "Set/Unset Target": let an operator promote a purely
+  `source: "probed"` record (discovered via a provider's `/v1/models` but
+  never declared in `[targets.*]`) into a routable, Enable/Disable-able one,
+  and demote it back. Closes a gap `applyProbeResults`'s own comment flagged
+  ("still needs a rank so it sorts sensibly if an override later makes it
+  targetable") — that never happened because `applyPolicy`/`desiredEntries`/
+  `selectDefault` all hard-filter on `target` being truthy, and no override
+  key can set it; only declaring a `[targets.<key>]` table can. No
+  router-side pipeline change: `discover()` already treats any `[targets.*]`
+  entry as declared regardless of how it got there. **Done**:
+  - `generateTargetKey()` / `upsertTarget()` / `removeTarget()`
+    (`toml-overrides.mjs`) — the same surgical, line-based, comment-preserving
+    editor as `upsertHarnessOverride`, against the sibling `[targets.<key>]`
+    table family instead of `[harness.overrides]`. The key is a
+    deterministic, collision-deduped slug (`slug(provider)_slug(id)`),
+    always a safe bare TOML identifier.
+  - `POST /api/capabilities/target/set` `{id, provider, locality}` and
+    `POST /api/capabilities/target/unset` `{target}`. `locality` is required
+    by the endpoint itself, not left to `validateConfig` — a missing
+    `locality` is silently defaulted to `"cluster"` there, which would
+    mislabel an actually remote/LAN model and break egress gating /
+    locality-based ranking.
+  - Console Capabilities table: a row with no target gets a locality
+    `<select>` (defaulted to whatever locality other targets on the same
+    provider already use, else `"lan"`) plus a "Set Target" button; a
+    declared row gets an "Unset Target" button alongside Enable/Disable.
+  - Deliberately **not** symmetric with Enable/Disable at the pipeline
+    level: Set Target is additive, so it auto-applies on the next reconcile
+    per the existing additive-only rule, same as flipping Enable. Unset
+    Target removes the record's `policy_reason: "operator override"`
+    status entirely — `applyProbeResults` re-classifies it
+    `"not declared as a target"` — which fails `planApply`'s override-driven
+    fast-path, so its removal from dsh's live list is held in `pending_ops`
+    for "Apply all" like any other non-override-driven removal (e.g. a
+    model going unreachable), not instant. A model shouldn't silently
+    vanish from live requests, so this is intentional, existing pipeline
+    behavior, not something P5 changes.
+  - `[harness.overrides.<id>]` for the id is deliberately left in place on
+    Unset Target — already a documented no-op for an id with no target
+    (`applyPolicy`'s override loop: `if (!rec) continue;`) — so a stale
+    rank/default naturally comes back into effect if the id is ever
+    re-targeted later.

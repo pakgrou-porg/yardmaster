@@ -333,3 +333,92 @@ test("server: /api/capabilities/override upserts [harness.overrides.<id>] and sa
   const bad = await fetch(`${base}/api/capabilities/override`, { method: "POST", body: JSON.stringify({ id: "" }) });
   assert.equal(bad.status, 400);
 });
+
+test("server: /api/capabilities/target/set declares [targets.<key>] and saves through the validate gate", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "ymc-"));
+  const cfgPath = join(dir, "yardmaster.toml");
+  writeFileSync(
+    cfgPath,
+    `schema_version = 1\n[egress]\nallow_remote = true\n[providers.openrouter]\nbase_url = "https://openrouter.ai/api/v1"\n[targets]\n`,
+  );
+  process.env.YM_CONFIG_PATH = cfgPath;
+  process.env.YM_CONFIG_FALLBACK = join(dir, "fallback.toml");
+  process.env.YM_METRICS_DB = join(dir, "none.db");
+
+  const { createConsoleServer } = await import(`../src/server.mjs?target-set`);
+  const srv = createConsoleServer();
+  await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+  const base = `http://127.0.0.1:${srv.address().port}`;
+  t.after(() => {
+    srv.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const r1 = await (
+    await fetch(`${base}/api/capabilities/target/set`, {
+      method: "POST",
+      body: JSON.stringify({ id: "openai/gpt-5.6-terra", provider: "openrouter", locality: "remote" }),
+    })
+  ).json();
+  assert.equal(r1.written, true, JSON.stringify(r1));
+  assert.equal(r1.target, "openrouter_openai_gpt_5_6_terra");
+  const raw1 = readFileSync(cfgPath, "utf8");
+  assert.match(raw1, /\[targets\.openrouter_openai_gpt_5_6_terra\]/);
+  assert.match(raw1, /^id = "openai\/gpt-5\.6-terra"$/m);
+  assert.match(raw1, /^locality = "remote"$/m);
+
+  // Missing locality is rejected by this endpoint even though validateConfig
+  // alone would silently default it to "cluster" — the exact footgun this
+  // endpoint exists to close.
+  const noLocality = await fetch(`${base}/api/capabilities/target/set`, {
+    method: "POST",
+    body: JSON.stringify({ id: "another/model", provider: "openrouter" }),
+  });
+  assert.equal(noLocality.status, 400);
+  assert.ok(!readFileSync(cfgPath, "utf8").includes("another/model"), "rejected write never touched the file");
+
+  // An unknown provider is caught by the existing validate gate.
+  const badProvider = await (
+    await fetch(`${base}/api/capabilities/target/set`, {
+      method: "POST",
+      body: JSON.stringify({ id: "x/y", provider: "no_such_provider", locality: "remote" }),
+    })
+  ).json();
+  assert.equal(badProvider.written, false);
+  assert.ok(badProvider.errors.some((e) => e.includes("no_such_provider")));
+});
+
+test("server: /api/capabilities/target/unset removes the [targets.<key>] table and saves through the validate gate", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "ymc-"));
+  const cfgPath = join(dir, "yardmaster.toml");
+  writeFileSync(
+    cfgPath,
+    `schema_version = 1\n[harness.overrides."m/1"]\nenabled = true\n[targets]\n[targets.x]\nid="m/1"\nprovider="p"\nlocality="lan"\n[providers.p]\nbase_url = "http://127.0.0.1:1234/v1"\n`,
+  );
+  process.env.YM_CONFIG_PATH = cfgPath;
+  process.env.YM_CONFIG_FALLBACK = join(dir, "fallback.toml");
+  process.env.YM_METRICS_DB = join(dir, "none.db");
+
+  const { createConsoleServer } = await import(`../src/server.mjs?target-unset`);
+  const srv = createConsoleServer();
+  await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+  const base = `http://127.0.0.1:${srv.address().port}`;
+  t.after(() => {
+    srv.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const r1 = await (
+    await fetch(`${base}/api/capabilities/target/unset`, { method: "POST", body: JSON.stringify({ target: "x" }) })
+  ).json();
+  assert.equal(r1.written, true, JSON.stringify(r1));
+  const raw1 = readFileSync(cfgPath, "utf8");
+  assert.ok(!raw1.includes("[targets.x]"), "target table removed");
+  assert.match(raw1, /\[harness\.overrides\."m\/1"\]/, "same-id override left in place");
+
+  const missing = await fetch(`${base}/api/capabilities/target/unset`, {
+    method: "POST",
+    body: JSON.stringify({ target: "nope" }),
+  });
+  assert.equal(missing.status, 400);
+});
