@@ -18,8 +18,8 @@ easy request goes to a fast model and a hard one to a strong model, waits on
 the Rust data plane (#25/#26), which is still a scaffold. The reference
 hardware (Strix Halo + two independent GB10s, [ADR-0029](0029-node-topology-and-replicas.md))
 has a natural split that benefits from quality-based routing now: a small
-judge on the Strix Halo, a replicated mid-size model on the GB10s, and the
-largest model on one GB10.
+judge and a mid-size model on one GB10, and the strongest agent model on the
+other, which it fills.
 
 ## Decision
 

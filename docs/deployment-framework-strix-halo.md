@@ -158,15 +158,18 @@ bind-mount it (see the commented mount in the stack).
   `OPENROUTER_API_KEY` environment variable (the stack passes it into the
   `yardmaster` service) and is **never written to the file**. `[egress]
   allow_remote = true` is required for the `locality = "remote"` targets to load;
-  default routing is still `[routes.default] → local`, so the OpenRouter models
+  default routing still stays on the LAN (`[routes.default]` → GB10s), so the OpenRouter models
   are used **only when a request names their slug**.
 
 The shipped example already contains the six OpenRouter targets
 (`openai/gpt-5.6-terra`, `openai/gpt-6-astra`, `qwen/qwen3.8-max-0902`,
 `deepseek/deepseek-v4-flash-vision-exp`, `qwen/qwen3.8-flash`,
 `anthropic/claude-sonnet-5`), local `llama3.2:latest` + `deepseek-r1:32b`, and
-two GB10 vLLM nodes described with `[nodes.*]`, with one model replicated on
-both for failover ([ADR-0029](decisions/0029-node-topology-and-replicas.md)). Adjust addresses /
+two GB10 vLLM nodes described with `[nodes.*]`
+([ADR-0029](decisions/0029-node-topology-and-replicas.md)): `gb10_b` dedicated
+to `qwen3.8-flash-next`, `gb10_a` running `qwen3.6-35b-a3b` and
+`gemma-4-12b-utility`. Unnamed requests go to `gb10_b`, then `gb10_a`, and
+the Harness defaults to `qwen3.8-flash-next`. Adjust addresses /
 model ids to your network. The Console's **Validate** button catches schema
 mistakes. For how requests get routed across the boxes, see
 [autorouting.md](autorouting.md).

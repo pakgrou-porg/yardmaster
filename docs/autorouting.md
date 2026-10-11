@@ -36,12 +36,29 @@ requests to it fail with `needs a target this router understands`.
 
 ## What to configure now
 
-### 1. Describe the hardware and declare replicas
+### 1. Describe the hardware and where each model runs
 
 Use [`yardmaster.toml.example`](../deploy/portainer/yardmaster.toml.example)
 as the starting point. It declares `[nodes.strix]`, `[nodes.gb10_a]` and
-`[nodes.gb10_b]` (with `fabric = "qsfp"` on the GB10s), gives every provider a
-`nodes = [...]` list, and declares one model on **both** GB10s:
+`[nodes.gb10_b]` (with `fabric = "qsfp"` on the GB10s), and gives every
+provider a `nodes = [...]` list. Each GB10 runs its own vLLM servers; nothing
+is sharded over the QSFP link.
+
+| Node | Models | Targets |
+| --- | --- | --- |
+| `gb10_b` (`10.116.2.120`) | `qwen3.8-flash-next`, which owns the whole memory pool | `gb10_b_flash_next` |
+| `gb10_a` (`10.116.2.56`) | `qwen3.6-35b-a3b` (`:8000`), `gemma-4-12b-utility` (`:8002`) | `gb10_a_qwen_a3b`, `gb10_a_gemma_utility` |
+| `strix` (desktop) | small Ollama models: `llama3.2:latest`, `deepseek-r1:32b` by name only | `local_llama32`, `local_r1_32b` |
+
+The Strix Halo is also the desktop (Claude Desktop runs there), so keep its
+models small: utility, judge, embeddings. GB10 prefill is much faster, so
+agentic and long-context work goes to the GB10s.
+
+### 2. Replicas (optional)
+
+No model is on both GB10s in this layout, so a request naming
+`qwen3.8-flash-next` fails while `gb10_b` is down. Declaring the same `id` on
+a second target makes it a **replica** (ADR-0029):
 
 ```toml,norun
 [targets.gb10_a_qwen_a3b]
@@ -55,44 +72,33 @@ locality = "lan"
 provider = "gb10_b_vllm"
 ```
 
-A request for `qwen3.6-35b-a3b` goes to `gb10_a`. If `gb10_a` is down, or
-still returns 429/503 after retries, the request moves to `gb10_b`. A replica
-the registry last probed as unreachable is tried last. Failover never moves a
-request to a cloud copy of the same id.
-
-### 2. Split the work across the boxes
-
-Each GB10 runs its own vLLM with its own models (128 GB each); nothing is
-sharded over the QSFP link. Two useful patterns, mixable per model:
-
-- **Replicated**: the same model id on both GB10s. Throughput plus failover.
-  Use it for the model the Harness and agents hit hardest.
-- **Specialized**: different models per GB10, for example a fast mid-size
-  model on `gb10_a` and the largest model that fits in 128 GB on `gb10_b`.
-  This gives more distinct models online, with no failover for those ids.
-
-The Strix Halo is also the desktop (Claude Desktop runs there), so keep its
-Ollama models small: utility, judge, embeddings, and a last-resort fallback.
-GB10 prefill is much faster, so put long-context and agentic work there.
+Requests go to the first one declared. If it is down, or still returns
+429/503 after retries, they move to the next. A replica the registry last
+probed as unreachable is tried last. Failover never moves a request to a cloud
+copy of the same id. A replica costs memory on the second box, which
+`qwen3.8-flash-next` leaves none of on `gb10_b`.
 
 ### 3. Pick the default route
 
 Anything whose `model` is not a declared id (for example `"model": "auto"`)
-follows `[routes.default]`. To stay entirely on the LAN, with Strix Halo as
-backstop:
+follows `[routes.default]`. The example stays on the LAN:
 
 ```toml,norun
 [routes.default]
 id = "auto"
 type = "escalation"
-weak_target = "gb10_a_qwen_a3b"   # expands to the gb10_a + gb10_b replicas
-strong_target = "local_r1_32b"    # Strix Halo, if both GB10s are unavailable
+weak_target = "gb10_b_flash_next"   # gb10_b first
+strong_target = "gb10_a_qwen_a3b"   # gb10_a if gb10_b is down or busy
+
+[harness]
+default_model = "qwen3.8-flash-next"   # a model id, not a target name
 ```
 
-The chain is `gb10_a` → `gb10_b` → Strix Halo. `escalation` here is
-**failure-based**, not quality-based. A cloud model as `strong_target` is
-allowed, but it is the only way an unnamed request leaves the LAN, so make
-that choice deliberately.
+The chain is `gb10_b` → `gb10_a`. `escalation` here is **failure-based**, not
+quality-based. Clients that must survive a `gb10_b` outage should send
+`"model": "auto"` instead of naming `qwen3.8-flash-next`. A cloud model as
+`strong_target` is allowed, but it is the only way an unnamed request leaves
+the LAN, so make that choice deliberately.
 
 For **quality-based** routing, make the default route an `llm_classifier`
 (next section). Keep the failure-based chain reachable as a named route if
@@ -103,17 +109,17 @@ you want both:
 id = "auto"
 type = "llm_classifier"
 mode = "capability"
-classifier_target = "local_llama32"     # judge on Strix Halo
-weak_target = "gb10_a_qwen_a3b"         # replicated on both GB10s
-strong_target = "gb10_b_large"          # largest model on gb10_b
+classifier_target = "gb10_a_gemma_utility"   # judge on gb10_a
+weak_target = "gb10_a_qwen_a3b"              # gb10_a
+strong_target = "gb10_b_flash_next"          # gb10_b
 base_threshold = 0.6
 threshold_step = 0.1
 
 [routes.failover]
-id = "failover"                         # "model": "failover"
+id = "failover"                              # "model": "failover"
 type = "escalation"
-weak_target = "gb10_a_qwen_a3b"
-strong_target = "local_r1_32b"
+weak_target = "gb10_b_flash_next"
+strong_target = "gb10_a_qwen_a3b"
 ```
 
 ### 4. Verify
@@ -121,17 +127,18 @@ strong_target = "local_r1_32b"
 ```bash
 curl -s -D- -o /dev/null http://<strix-ip>:11435/v1/chat/completions \
   -H 'content-type: application/json' \
-  -d '{"model":"qwen3.6-35b-a3b","messages":[{"role":"user","content":"hi"}]}' \
+  -d '{"model":"auto","messages":[{"role":"user","content":"hi"}]}' \
   | grep -i '^x-yardmaster'
-#   x-yardmaster-target: gb10_a_qwen_a3b
-#   x-yardmaster-nodes: gb10_a
-#   x-yardmaster-failover: 0          (1 = served by the second replica)
+#   x-yardmaster-target: gb10_b_flash_next
+#   x-yardmaster-nodes: gb10_b
+#   x-yardmaster-failover: 0          (1 = served by the next hop, gb10_a)
 
-curl -s http://<strix-ip>:11435/v1/capabilities | jq '.records[] | {id, reachability, placement, replicas: [.replicas[] | {target, reachability}]}'
+curl -s http://<strix-ip>:11435/v1/capabilities | jq '.records[] | {id, reachability, placement}'
 ```
 
 The Console's **Capabilities** tab shows the same information in its
-**placement** column (`gb10_a | gb10_b`, `✗` on a down replica). The **Metrics** tab shows `failover_count` per request.
+**placement** column (`✗` on a down replica). The **Metrics** tab shows
+`failover_count` per request.
 
 ## Routes that run today
 
@@ -142,18 +149,18 @@ full key reference is in [routing.md](routing.md).
 
 ### `llm_classifier`, capability mode: a judge decides per request
 
-A small judge on the Strix Halo scores each request. Easy requests go to the
-replicated mid-size model; hard ones go to the largest model on `gb10_b`. Keep `judge_egress = "deny"` so the
-classifier never sees a cloud model.
+A small judge scores each request. Easy requests go to `qwen3.6-35b-a3b` on
+`gb10_a`; hard ones go to `qwen3.8-flash-next` on `gb10_b`. Keep
+`judge_egress = "deny"` so the classifier never sees a cloud model.
 
 ```toml,norun
 [routes.classified]
 id = "classified"
 type = "llm_classifier"
 mode = "capability"
-classifier_target = "local_llama32"     # judge on Strix Halo
+classifier_target = "gb10_a_gemma_utility"   # judge on gb10_a
 weak_target = "gb10_a_qwen_a3b"
-strong_target = "gb10_b_large"          # declare: largest model that fits on gb10_b
+strong_target = "gb10_b_flash_next"
 base_threshold = 0.7
 threshold_step = 0.1
 judge_egress = "deny"
@@ -172,8 +179,9 @@ other outcome goes to `strong_target`: a judge that is down, times out
 - The judge call adds latency to every request on the route, so use a fast
   model. Check that it returns valid JSON with
   `curl … -D- | grep x-yardmaster-classifier`. `reason=ambiguous` on every
-  request means the judge can't follow the schema, so try a larger judge
-  (for example the 12B utility model on a GB10).
+  request means the judge can't follow the schema, so try a larger judge.
+  `local_llama32` on the Strix Halo is a lighter alternative to the 12B
+  utility model, if it follows the schema.
 - Responses carry `x-yardmaster-classifier: tier=…; p_solve=…; threshold=…;
   rule=…; boundary=…`, and the Metrics tab records `rule=judge:<boundary>`.
   The judge's `crux` (a paraphrase of the prompt) is never logged or returned.
@@ -188,7 +196,7 @@ other outcome goes to `strong_target`: a judge that is down, times out
 [routes.ab]
 id = "ab"
 type = "random"
-targets = ["gb10_a_qwen_a3b", "gb10_b_gemma_utility"]
+targets = ["gb10_b_flash_next", "gb10_a_qwen_a3b"]
 weights = [3, 1]
 ```
 
@@ -208,7 +216,7 @@ efficient model and moves up once confidence drops below the threshold.
 id = "staged"
 type = "stage_router"
 efficient_target = "local_llama32"      # Strix Halo
-capable_target = "gb10_a_qwen_a3b"      # GB10 (replicated)
+capable_target = "gb10_b_flash_next"    # gb10_b
 picker = "efficient_first"
 confidence_threshold = 0.6
 recent_turn_window = 3
@@ -219,15 +227,15 @@ recent_turn_window = 3
 ```toml,norun
 [tiers.planner]
 role = "planner"
-models = ["<largest model on gb10_b>", "qwen3.6-35b-a3b"]   # gb10_b first, replicated model fallback
+models = ["qwen3.8-flash-next", "qwen3.6-35b-a3b"]   # gb10_b, then gb10_a
 
 [tiers.worker]
 role = "worker"
-models = ["qwen3.6-35b-a3b", "deepseek-r1:32b"]      # GB10 replicas, then Strix Halo
+models = ["qwen3.6-35b-a3b", "qwen3.8-flash-next"]   # gb10_a, then gb10_b
 
 [tiers.judge]
 role = "judge"
-models = ["llama3.2:latest"]                          # Strix Halo
+models = ["gemma-4-12b-utility", "llama3.2:latest"] # gb10_a, then Strix Halo
 
 [routes.plan-execute]
 id = "plan-execute"
@@ -241,15 +249,16 @@ judge_egress = "deny"
 ```
 
 Clients can force a tier with `X-Yardmaster-Tier: planner|worker`. This is
-the best fit for the DeepSeek Harness: plans go to the large model on
-`gb10_b`, and tool-call loops go to the replicated model.
+the best fit for the DeepSeek Harness: plans go to `qwen3.8-flash-next` on
+`gb10_b`, and tool-call loops go to `qwen3.6-35b-a3b` on `gb10_a`.
 
 ## Hard limits
 
 - Replica order is declaration order. There is no load- or memory-aware
   balancing until PAIR `vram_aware` placement
   ([#33](https://github.com/pakgrou-porg/yardmaster/issues/33)) exists.
-- A model on only one GB10 has no failover. Replicate it if that matters.
+- A model on only one GB10 has no failover by name. Use `"model": "auto"`
+  (the default route) or replicate it.
 - The router does not start or stop vLLM, or move models between boxes. The
   registry notices model changes within one reconcile interval
   (`YM_CAPABILITIES_RECONCILE_S`, default 60 s).
