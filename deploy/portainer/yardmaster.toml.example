@@ -40,11 +40,31 @@ prometheus = true
 
 [targets]
 
+# ------------------------------------------------------------------- hardware
+# ADR-0029. Where engines physically run. Optional and informational, except
+# that it powers placement in /v1/capabilities, the Console's Capabilities
+# tab, and the x-yardmaster-nodes response header. `fabric` names a dedicated
+# interconnect; nodes sharing one can host a single engine sharded across them.
+[nodes.strix]
+accelerator = "strix_halo"   # Radeon 8060S, ROCm
+memory_gb = 128
+
+[nodes.gb10_a]
+accelerator = "gb10"
+memory_gb = 128
+fabric = "qsfp"              # direct QSFP link to gb10_b
+
+[nodes.gb10_b]
+accelerator = "gb10"
+memory_gb = 128
+fabric = "qsfp"
+
 # ------------------------------------------------------------------ local Ollama
 # The engine itself (127.0.0.1:11434 in the shared namespace), not the :11435 proxy.
 [providers.local_ollama]
 kind = "openai_compatible"
 base_url = "http://127.0.0.1:11434"
+nodes = ["strix"]
 
 [targets.local_llama32]
 id = "llama3.2:latest"
@@ -56,24 +76,51 @@ id = "deepseek-r1:32b"
 locality = "lan"
 provider = "local_ollama"
 
-# --------------------------------------------------------------- LAN vLLM nodes
+# ------------------------------------------------------------- GB10 vLLM nodes
 # Private-range hosts, plain http, no key. Adjust addresses / model ids to match
 # `curl http://<host>:<port>/v1/models` on each box.
-[providers.lan_vllm_utility]
+#
+# One vLLM server per GB10 for models that fit in 128 GB:
+[providers.gb10_a_vllm]
 kind = "openai_compatible"
-base_url = "http://10.116.2.56:8002/v1"
-[targets.lan_gemma_utility]
-id = "gemma-4-12b-utility"
-locality = "lan"
-provider = "lan_vllm_utility"
+base_url = "http://10.116.2.56:8000/v1"
+nodes = ["gb10_a"]
 
-[providers.lan_vllm_big]
+[providers.gb10_b_vllm]
 kind = "openai_compatible"
 base_url = "http://10.116.2.120:8000/v1"
-[targets.lan_qwen_a3b]
+nodes = ["gb10_b"]
+
+# The same model id on both GB10s is a *replica*: requests go to the first one
+# declared and fail over to the other if it is down, busy (429/503) or errors.
+[targets.gb10_a_qwen_a3b]
 id = "qwen3.6-35b-a3b"
 locality = "lan"
-provider = "lan_vllm_big"
+provider = "gb10_a_vllm"
+
+[targets.gb10_b_qwen_a3b]
+id = "qwen3.6-35b-a3b"
+locality = "lan"
+provider = "gb10_b_vllm"
+
+[targets.gb10_b_gemma_utility]
+id = "gemma-4-12b-utility"
+locality = "lan"
+provider = "gb10_b_vllm"
+
+# One engine across both GB10s (vLLM + Ray, tensor/pipeline parallel over the
+# QSFP link) for models that need up to ~256 GB. The API is served by the Ray
+# head node. Uncomment once that engine is running. Memory spent on it is not
+# available to the single-node servers above, so don't run both at full size.
+# [providers.gb10_pair_vllm]
+# kind = "openai_compatible"
+# base_url = "http://10.116.2.56:8010/v1"
+# nodes = ["gb10_a", "gb10_b"]
+#
+# [targets.gb10_pair_big]
+# id = "qwen3.8-235b-a22b"
+# locality = "lan"
+# provider = "gb10_pair_vllm"
 
 # ------------------------------------------------------------------- OpenRouter
 # Cloud fallback. Keyed via env (OPENROUTER_API_KEY). Reached only when a request

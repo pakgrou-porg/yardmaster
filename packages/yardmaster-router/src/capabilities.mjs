@@ -24,7 +24,7 @@
 import { readFile, writeFile, copyFile, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import { execFile } from "node:child_process";
-import { providerEndpoint } from "./router.mjs";
+import { providerEndpoint, providerPlacement } from "./router.mjs";
 
 export const REGION_BEGIN = "# BEGIN yardmaster-managed  (do not edit; managed by the capability pipeline — ADR-0028)";
 export const REGION_END = "# END yardmaster-managed";
@@ -87,11 +87,34 @@ export function discover(config) {
   let order = 0;
   for (const [targetName, t] of Object.entries(config.targets)) {
     if (!t || typeof t.id !== "string" || !t.id) continue;
+    const replica = {
+      target: targetName,
+      provider: t.provider,
+      locality: t.locality || "cluster",
+      placement: providerPlacement(t.provider, config),
+      reachability: "discovered",
+      reachability_checked_ms: null,
+    };
+    const existing = records.get(t.id);
+    if (existing) {
+      // ADR-0029: the same model id declared again (another node, or the
+      // GB10 pair) is a replica of the first declaration, not a replacement
+      // for it. The first-declared target stays the record's primary; its
+      // TOML metadata wins, a later replica only fills gaps.
+      existing.replicas.push(replica);
+      if (existing.context_window == null && Number.isFinite(t.context_window)) existing.context_window = t.context_window;
+      for (const [flag, key] of [["tools", "tool_calling"], ["vision", "vision"], ["reasoning", "reasoning"]]) {
+        if (existing.capabilities[flag] == null && typeof t[key] === "boolean") existing.capabilities[flag] = t[key];
+      }
+      continue;
+    }
     records.set(t.id, {
       id: t.id,
       target: targetName,
       provider: t.provider,
-      locality: t.locality || "cluster",
+      locality: replica.locality,
+      placement: replica.placement,
+      replicas: [replica],
       source: "declared",
       order: order++,
       context_window: Number.isFinite(t.context_window) ? t.context_window : null,
@@ -130,23 +153,31 @@ export function discover(config) {
 // probeMap: Map<providerName, { ok, checkedMs, models: Map<id, {context_length, pricing}> } | null>
 // ---------------------------------------------------------------------------
 
-export function applyProbeResults(records, probeMap) {
+export function applyProbeResults(records, probeMap, config = null) {
   for (const rec of records.values()) {
-    const p = probeMap.get(rec.provider);
-    if (!p) continue; // provider not probed this round — leave "discovered"
-    rec.reachability_checked_ms = p.checkedMs;
-    if (!p.ok) {
-      rec.reachability = "unreachable";
-      continue;
+    // Each replica (ADR-0029) is probed through its own provider; the record
+    // is "validated" if any replica is, "unreachable" only once every probed
+    // replica failed, else still "discovered".
+    let checked = null;
+    for (const rep of rec.replicas ?? []) {
+      const p = probeMap.get(rep.provider);
+      if (!p) continue; // provider not probed this round — leave "discovered"
+      rep.reachability_checked_ms = p.checkedMs;
+      checked = Math.max(checked ?? 0, p.checkedMs);
+      const meta = p.ok ? p.models.get(rec.id) : null;
+      if (!meta) {
+        rep.reachability = "unreachable";
+        continue;
+      }
+      rep.reachability = "validated";
+      if (rec.context_window == null && Number.isFinite(meta.context_length)) rec.context_window = meta.context_length;
+      if (!rec.pricing_usd_per_mtok && meta.pricing) rec.pricing_usd_per_mtok = meta.pricing;
     }
-    const meta = p.models.get(rec.id);
-    if (!meta) {
-      rec.reachability = "unreachable";
-      continue;
-    }
-    rec.reachability = "validated";
-    if (rec.context_window == null && Number.isFinite(meta.context_length)) rec.context_window = meta.context_length;
-    if (!rec.pricing_usd_per_mtok && meta.pricing) rec.pricing_usd_per_mtok = meta.pricing;
+    if (checked == null) continue;
+    rec.reachability_checked_ms = checked;
+    const states = (rec.replicas ?? []).map((r) => r.reachability);
+    if (states.includes("validated")) rec.reachability = "validated";
+    else if (states.every((st) => st === "unreachable")) rec.reachability = "unreachable";
   }
   // Probed-but-undeclared models: visible in the registry (source "probed"),
   // never routable (no target), so always policy-disabled.
@@ -159,6 +190,8 @@ export function applyProbeResults(records, probeMap) {
         target: null,
         provider: providerName,
         locality: null,
+        placement: config ? providerPlacement(providerName, config) : null,
+        replicas: [],
         source: "probed",
         order: 1_000_000 + records.size,
         context_window: Number.isFinite(meta.context_length) ? meta.context_length : null,
@@ -693,7 +726,7 @@ export function makeDshValidator({ dshBin, dshHome, nodeBin = process.execPath, 
 
 export function runPipeline(config, probeMap, harnessCfg, previousApplied) {
   let records = discover(config);
-  records = applyProbeResults(records, probeMap);
+  records = applyProbeResults(records, probeMap, config);
   records = applyPolicy(records, harnessCfg);
   records = applyApproval(records, harnessCfg);
   const defaultChoice = selectDefault(records, config, harnessCfg);

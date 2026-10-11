@@ -86,6 +86,25 @@ port = 3080
 prefer_user_install = true
 ```
 
+### Nodes (ADR-0029)
+
+```toml,norun
+[nodes.gb10_a]
+accelerator = "gb10"       # free-form label
+memory_gb = 128
+fabric = "qsfp"            # dedicated interconnect; nodes sharing one can host one sharded engine
+
+[providers.gb10_pair_vllm]
+base_url = "http://10.116.2.56:8010/v1"
+nodes = ["gb10_a", "gb10_b"]   # where this provider's engine runs
+```
+
+The same `id` on several `[targets.*]` makes them **replicas**: one capability
+record, per-replica reachability, and failover in declaration order. Failover
+never moves to a `remote` replica unless the primary is remote. See
+[decisions/0029](decisions/0029-node-topology-and-replicas.md) and
+[autorouting.md](autorouting.md).
+
 ### Targets gain a `locality`
 
 ```toml,norun

@@ -235,3 +235,71 @@ default = true
   ok(r, "multiple defaults is a warning");
   assert.ok(r.warnings.some((w) => w.includes("only the first one wins")));
 });
+
+test("[nodes] + provider nodes (ADR-0029): valid topology passes, bad refs and keys fail", () => {
+  const base = `schema_version = 1
+[nodes.gb10_a]
+accelerator = "gb10"
+memory_gb = 128
+fabric = "qsfp"
+[nodes.gb10_b]
+accelerator = "gb10"
+memory_gb = 128
+fabric = "qsfp"
+[nodes.strix]
+accelerator = "strix_halo"
+memory_gb = 128
+[providers.pair]
+kind = "openai_compatible"
+base_url = "http://10.0.0.11:8010/v1"
+nodes = ["gb10_a", "gb10_b"]
+[targets.huge]
+id = "huge"
+locality = "lan"
+provider = "pair"
+[routes.default]
+id = "auto"
+type = "passthrough"
+target = "huge"
+`;
+  const good = validateConfig(base);
+  ok(good, "topology");
+  assert.equal(good.warnings.length, 0, good.warnings.join("; "));
+
+  const unknownNode = validateConfig(base.replace('nodes = ["gb10_a", "gb10_b"]', 'nodes = ["gb10_a", "gb10_c"]'));
+  hasErr(unknownNode, 'names "gb10_c" which has no matching [nodes.gb10_c]');
+
+  const badKey = validateConfig(base.replace('fabric = "qsfp"\n[nodes.strix]', 'fabric = "qsfp"\nvram = 1\n[nodes.strix]'));
+  hasErr(badKey, "unknown key `nodes.gb10_b.vram`");
+
+  const noFabric = validateConfig(base.replace('nodes = ["gb10_a", "gb10_b"]', 'nodes = ["gb10_a", "strix"]'));
+  ok(noFabric, "spanning without a fabric is legal");
+  assert.ok(noFabric.warnings.some((w) => w.includes("don't share a [nodes.*].fabric")));
+});
+
+test("replicas across remote and LAN get a warning", () => {
+  const r = validateConfig(`schema_version = 1
+[egress]
+allow_remote = true
+[providers.lan]
+kind = "openai_compatible"
+base_url = "http://10.0.0.11:8000/v1"
+[providers.openrouter]
+kind = "openrouter"
+api_key_env = "OPENROUTER_API_KEY"
+[targets.a]
+id = "m"
+locality = "lan"
+provider = "lan"
+[targets.b]
+id = "m"
+locality = "remote"
+provider = "openrouter"
+[routes.default]
+id = "auto"
+type = "passthrough"
+target = "a"
+`);
+  ok(r, "mixed replicas");
+  assert.ok(r.warnings.some((w) => w.includes('model "m" is declared on both remote and non-remote')));
+});

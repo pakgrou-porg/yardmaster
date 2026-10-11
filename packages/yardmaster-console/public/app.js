@@ -154,9 +154,20 @@ async function refreshCapabilities() {
     b.addEventListener("click", () => overrideAction(b.dataset.reject, { approved: false })),
   );
 
+  // ADR-0029: where each replica of a model runs, e.g. "gb10_a | gb10_a+gb10_b (qsfp)".
+  const placementText = (r) => {
+    const reps = r.replicas?.length ? r.replicas : r.placement ? [{ placement: r.placement }] : [];
+    const parts = reps.map((rep) => {
+      const p = rep.placement;
+      if (!p) return rep.provider ?? "—";
+      const nodes = p.nodes.join("+") + (p.span === "multi" && p.fabric ? ` (${p.fabric})` : "");
+      return rep.reachability === "unreachable" ? `${nodes} ✗` : nodes;
+    });
+    return parts.length ? parts.join(" | ") : "—";
+  };
   const rows = [...(d.records || [])].sort((a, b) => (a.rank ?? 1e9) - (b.rank ?? 1e9) || a.id.localeCompare(b.id));
   $("#cap-list").innerHTML =
-    `<table><tr><th>id</th><th>provider</th><th>locality</th><th>reachability</th><th>policy</th>` +
+    `<table><tr><th>id</th><th>provider</th><th>locality</th><th>placement</th><th>reachability</th><th>policy</th>` +
     `<th>approval</th><th>rank</th><th>default</th><th></th></tr>` +
     rows
       .map((r) => {
@@ -177,6 +188,7 @@ async function refreshCapabilities() {
         }
         return (
           `<tr><td>${esc(r.id)}</td><td class="dim">${esc(r.provider)}</td><td class="dim">${esc(r.locality ?? "—")}</td>` +
+          `<td class="dim">${esc(placementText(r))}</td>` +
           `<td>${reachPill(r.reachability)}</td><td>${policyPill(r.policy, r.policy_reason)}</td>` +
           `<td>${approvalPill(r.approval)}</td>` +
           `<td class="dim">${r.rank ?? "—"}</td><td>${r.default ? "✓" : ""}</td><td>${actions}</td></tr>`

@@ -698,3 +698,78 @@ test("writeManagedRegion: gated write self-heals from .lkg on a rejected validat
   }
   assert.equal(readFileSync(patchPath, "utf8"), goodText);
 });
+
+// ADR-0029 — replicas and placement in the registry.
+const TOPO_CFG = `
+schema_version = 1
+[nodes.gb10_a]
+accelerator = "gb10"
+memory_gb = 128
+fabric = "qsfp"
+[nodes.gb10_b]
+accelerator = "gb10"
+memory_gb = 128
+fabric = "qsfp"
+[providers.a]
+base_url = "http://10.0.0.11:8000/v1"
+nodes = ["gb10_a"]
+[providers.b]
+base_url = "http://10.0.0.12:8000/v1"
+nodes = ["gb10_b"]
+[providers.pair]
+base_url = "http://10.0.0.11:8010/v1"
+nodes = ["gb10_a", "gb10_b"]
+[targets.mid_a]
+id = "mid"
+locality = "lan"
+provider = "a"
+context_window = 65536
+[targets.mid_b]
+id = "mid"
+locality = "lan"
+provider = "b"
+tool_calling = true
+[targets.huge]
+id = "huge"
+locality = "lan"
+provider = "pair"
+`;
+
+test("discover: a repeated id is one record with replicas, first declaration primary", () => {
+  const records = discover(parseConfig(TOPO_CFG));
+  assert.equal(records.size, 2);
+  const mid = records.get("mid");
+  assert.equal(mid.target, "mid_a");
+  assert.deepEqual(mid.replicas.map((r) => r.target), ["mid_a", "mid_b"]);
+  assert.equal(mid.context_window, 65536);
+  assert.equal(mid.capabilities.tools, true); // gap filled from the second replica
+  assert.deepEqual(records.get("huge").placement, {
+    nodes: ["gb10_a", "gb10_b"], span: "multi", accelerators: ["gb10"], memory_gb: 256, fabric: "qsfp",
+  });
+});
+
+test("applyProbeResults: a model stays validated while any replica answers, unreachable once all fail", () => {
+  const config = parseConfig(TOPO_CFG);
+  const up = (ids) => ({ ok: true, checkedMs: 5, models: new Map(ids.map((id) => [id, { context_length: null, pricing: null }])) });
+  const down = { ok: false, checkedMs: 5, models: new Map() };
+
+  let records = applyProbeResults(discover(config), new Map([["a", down], ["b", up(["mid"])], ["pair", up(["huge"])]]), config);
+  const mid = records.get("mid");
+  assert.equal(mid.reachability, "validated");
+  assert.deepEqual(mid.replicas.map((r) => r.reachability), ["unreachable", "validated"]);
+
+  records = applyProbeResults(discover(config), new Map([["a", down], ["b", down], ["pair", down]]), config);
+  assert.equal(records.get("mid").reachability, "unreachable");
+  assert.equal(records.get("huge").reachability, "unreachable");
+
+  // one replica unprobed this round, the other down -> still "discovered", not written off
+  records = applyProbeResults(discover(config), new Map([["a", down]]), config);
+  assert.equal(records.get("mid").reachability, "discovered");
+});
+
+test("runPipeline: a replicated model renders once", () => {
+  const config = parseConfig(TOPO_CFG);
+  const up = { ok: true, checkedMs: 5, models: new Map([["mid", {}], ["huge", {}]]) };
+  const { desired } = runPipeline(config, new Map([["a", up], ["b", up], ["pair", up]]), parseHarnessConfig(config), null);
+  assert.deepEqual(desired.entries.map((e) => e.id).sort(), ["huge", "mid"]);
+});

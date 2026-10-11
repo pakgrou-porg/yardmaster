@@ -264,9 +264,20 @@ function capabilityModelList() {
       capabilities: rec?.capabilities ?? { tools: null, vision: null, reasoning: null },
       pricing_usd_per_mtok: rec?.pricing_usd_per_mtok ?? null,
       locality: rec?.locality ?? null,
+      placement: rec?.replicas?.length ? rec.replicas.map((r) => r.placement).filter(Boolean) : [],
       default: e.id === registry.plan.appliedDefaultId,
     };
   });
+}
+
+/** Last-probed reachability per target name (ADR-0029), so the request path
+ * tries a live replica of a model before one the registry last saw down. */
+function replicaHealth() {
+  const health = new Map();
+  for (const rec of registry.records.values()) {
+    for (const rep of rec.replicas ?? []) health.set(rep.target, rep.reachability);
+  }
+  return health;
 }
 
 // --- helpers ------------------------------------------------------------
@@ -396,7 +407,7 @@ async function handleChat(req, res, { ingress }) {
     return json(res, 400, { error: { message: "invalid JSON body" } });
   }
   const wantStream = payload.stream === true;
-  const decided = resolveRoute(config, payload.model);
+  const decided = resolveRoute(config, payload.model, { health: replicaHealth() });
   const row = baseMetricRow(req, ingress);
   row.model = String(payload.model || "");
   row.stream = wantStream ? 1 : 0;
@@ -448,7 +459,9 @@ async function handleChat(req, res, { ingress }) {
   row.engine_kind = hop.engineKind;
   row.locality = hop.locality;
   row.failover_count = hopIndex + retries;
-  row.tier_decided = hopIndex > 0 ? "planner" : row.tier_decided;
+  // Only an escalation route's strong hop changes tier; failing over between
+  // replicas of the same model (ADR-0029) is the same tier on another node.
+  row.tier_decided = hop.escalated ? "planner" : row.tier_decided;
   row.http_status = upstream.status;
   row.routing_overhead_ms = routingOverhead;
 
@@ -461,6 +474,7 @@ async function handleChat(req, res, { ingress }) {
     "x-yardmaster-provider": hop.provider,
     "x-yardmaster-locality": hop.locality,
     "x-yardmaster-failover": String(hopIndex),
+    ...(hop.nodes ? { "x-yardmaster-nodes": hop.nodes.join(",") } : {}),
     "x-yardmaster-retries": String(retries),
   };
   const servedBy = upstream.headers.get("x-served-by");
@@ -537,7 +551,7 @@ async function handleOllamaChat(req, res) {
   };
   // Reuse the OpenAI path by faking a sub-request: resolve + dispatch, then
   // translate the response shape back to Ollama.
-  const decided = resolveRoute(config, openai.model);
+  const decided = resolveRoute(config, openai.model, { health: replicaHealth() });
   if (!decided.ok) return json(res, 502, { error: `yardmaster-router: ${decided.error}` });
   const result = await dispatch(decided.chain, openai, {});
   if (result.error || !result.upstream) {
