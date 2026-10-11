@@ -5,7 +5,8 @@
  * yardmaster-router — the interim inference data plane (repo issue #36 replaces
  * it with the Rust `yardmaster-dataplane`). Config-driven routing of OpenAI /
  * Ollama chat requests to local / LAN / OpenRouter backends by model id, with
- * `passthrough` + `escalation` routes, streaming, and metrics.
+ * `passthrough` / `escalation` / `random` / `llm_classifier` routes (named
+ * routes selected by `model` = route id), streaming, and metrics.
  *
  * Endpoints:
  *   GET  /healthz
@@ -42,6 +43,7 @@ import { createServer } from "node:http";
 import { readFileSync, statSync, existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { parseConfig, resolveRoute, knownModels, sniffUsage } from "./router.mjs";
+import { classify, classificationHeader } from "./classifier.mjs";
 import { openMetrics } from "./metrics.mjs";
 import {
   parseHarnessConfig,
@@ -67,6 +69,9 @@ const cfg = {
   // rate limits hard; this smooths them so the client rarely sees a 429.
   retryMax: Number(process.env.YM_ROUTER_RETRY || 4),
   retryBaseMs: Number(process.env.YM_ROUTER_RETRY_BASE_MS || 600),
+  // llm_classifier judge call (ADR-0030). On timeout the route fails open to
+  // its strong target, so keep this short: it is added to every judged request.
+  judgeTimeoutMs: Number(process.env.YM_ROUTER_JUDGE_TIMEOUT_MS || 10000),
 };
 
 // Capability-registry pipeline (ADR-0028 P1) — Harness model discovery. Off by
@@ -280,6 +285,13 @@ function replicaHealth() {
   return health;
 }
 
+/** Route a chat payload; an `llm_classifier` route also runs its judge here. */
+async function decide(payload) {
+  const decided = resolveRoute(config, payload.model, { health: replicaHealth() });
+  if (!decided.ok || !decided.classify) return decided;
+  return classify(decided, payload, { timeoutMs: cfg.judgeTimeoutMs });
+}
+
 // --- helpers ------------------------------------------------------------
 const readBody = (req) =>
   new Promise((resolve, reject) => {
@@ -407,7 +419,7 @@ async function handleChat(req, res, { ingress }) {
     return json(res, 400, { error: { message: "invalid JSON body" } });
   }
   const wantStream = payload.stream === true;
-  const decided = resolveRoute(config, payload.model, { health: replicaHealth() });
+  const decided = await decide(payload);
   const row = baseMetricRow(req, ingress);
   row.model = String(payload.model || "");
   row.stream = wantStream ? 1 : 0;
@@ -431,6 +443,10 @@ async function handleChat(req, res, { ingress }) {
   row.algorithm = decided.algorithm;
   row.decision_reason = decided.decisionReason;
   row.candidate_set_size = decided.chain.length;
+  if (decided.classification) {
+    const c = decided.classification;
+    row.rule = c.boundary ? `judge:${c.boundary}` : `judge-failopen:${String(c.reason).slice(0, 40)}`;
+  }
 
   const passHeaders = {};
   for (const h of ["x-yardmaster-session", "x-yardmaster-agent", "x-yardmaster-step", "x-yardmaster-tier"]) {
@@ -475,6 +491,7 @@ async function handleChat(req, res, { ingress }) {
     "x-yardmaster-locality": hop.locality,
     "x-yardmaster-failover": String(hopIndex),
     ...(hop.nodes ? { "x-yardmaster-nodes": hop.nodes.join(",") } : {}),
+    ...(decided.classification ? { "x-yardmaster-classifier": classificationHeader(decided.classification) } : {}),
     "x-yardmaster-retries": String(retries),
   };
   const servedBy = upstream.headers.get("x-served-by");
@@ -551,7 +568,7 @@ async function handleOllamaChat(req, res) {
   };
   // Reuse the OpenAI path by faking a sub-request: resolve + dispatch, then
   // translate the response shape back to Ollama.
-  const decided = resolveRoute(config, openai.model, { health: replicaHealth() });
+  const decided = await decide(openai);
   if (!decided.ok) return json(res, 502, { error: `yardmaster-router: ${decided.error}` });
   const result = await dispatch(decided.chain, openai, {});
   if (result.error || !result.upstream) {
