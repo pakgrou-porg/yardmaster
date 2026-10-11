@@ -5,9 +5,9 @@ SPDX-License-Identifier: Apache-2.0
 
 # Auto-routing on Strix Halo + two GB10s
 
-How to get requests to the right box automatically, what runs today, and how
-the Switchyard algorithms map onto this hardware once the Rust data plane runs
-them.
+How to get requests to the right box automatically: what runs today in the
+interim router, and how the remaining Switchyard algorithms map onto this
+hardware once the Rust data plane runs them.
 
 ## Status
 
@@ -20,18 +20,19 @@ them.
 | Retry with backoff on 429/502/503/529 | yes | |
 | `[egress]` gate, decision headers, Metrics tab | yes | |
 | Harness model list + default from the capability registry | yes | |
-| Named routes (`"model": "<route id>"` selecting `[routes.<name>]`) | **no**: only `[routes.default]` is read | yes |
-| `random`, `stage_router`, `llm_classifier` (capability / escalation mode) | **no** | yes |
+| Named routes (`"model": "<route id>"` selects that route) ([ADR-0030](decisions/0030-interim-classifier-routing.md)) | yes | |
+| `random` (weighted, optional `seed`) | yes | |
+| `llm_classifier`, capability mode (judge picks weak or strong) | yes | |
+| `llm_classifier`, escalation mode | **no**: runs as failure-based weak → strong | yes |
+| `stage_router` | **no** | yes |
 | `plan_execute` + `[tiers.*]` | **no** | yes |
 | PAIR placement (`warm_first`, `vram_aware`) | **no** | yes |
 
 The Console's Validate button accepts every Switchyard route type, because the
-config schema is the long-term contract. The interim router only reads
-`[routes.default]`. If that route's `type` is anything other than
-`passthrough` or `escalation`, the router passes through to its `target`. If
-there is no `target`, every unmatched request fails with `needs a target this
-router understands`. **Do not set `[routes.default]` to `stage_router`,
-`llm_classifier` or `plan_execute` yet.**
+config schema is the long-term contract, and warns about the ones the interim
+router can't run. A `stage_router`, `plan_execute`, `composite` or
+`prefill_router` route only passes through to its `target`; without one,
+requests to it fail with `needs a target this router understands`.
 
 ## What to configure now
 
@@ -99,6 +100,28 @@ quality-based. Clients that must survive a `gb10_b` outage should send
 `strong_target` is allowed, but it is the only way an unnamed request leaves
 the LAN, so make that choice deliberately.
 
+For **quality-based** routing, make the default route an `llm_classifier`
+(next section). Keep the failure-based chain reachable as a named route if
+you want both:
+
+```toml,norun
+[routes.default]
+id = "auto"
+type = "llm_classifier"
+mode = "capability"
+classifier_target = "gb10_a_gemma_utility"   # judge on gb10_a
+weak_target = "gb10_a_qwen_a3b"              # gb10_a
+strong_target = "gb10_b_flash_next"          # gb10_b
+base_threshold = 0.6
+threshold_step = 0.1
+
+[routes.failover]
+id = "failover"                              # "model": "failover"
+type = "escalation"
+weak_target = "gb10_b_flash_next"
+strong_target = "gb10_a_qwen_a3b"
+```
+
 ### 4. Verify
 
 ```bash
@@ -117,13 +140,71 @@ The Console's **Capabilities** tab shows the same information in its
 **placement** column (`✗` on a down replica). The **Metrics** tab shows
 `failover_count` per request.
 
-## Switchyard algorithms on this hardware (once the data plane runs them)
+## Routes that run today
 
-In Switchyard, the request's `model` names a **route**: `"model": "classified"`
-runs `[routes.classified]`. These configs pass validation today, and they are
-the intended mapping for this hardware. Add them once the data plane routes
-named routes. The full key reference is in [routing.md](routing.md); tiers
-are described in [plan-execute.md](plan-execute.md).
+In Switchyard, and in this router since ADR-0030, the request's `model` can
+name a **route**: `"model": "classified"` runs the route whose `id` is
+`"classified"`. A `[targets.*]` id with the same name takes precedence. The
+full key reference is in [routing.md](routing.md).
+
+### `llm_classifier`, capability mode: a judge decides per request
+
+A small judge scores each request. Easy requests go to `qwen3.6-35b-a3b` on
+`gb10_a`; hard ones go to `qwen3.8-flash-next` on `gb10_b`. Keep
+`judge_egress = "deny"` so the classifier never sees a cloud model.
+
+```toml,norun
+[routes.classified]
+id = "classified"
+type = "llm_classifier"
+mode = "capability"
+classifier_target = "gb10_a_gemma_utility"   # judge on gb10_a
+weak_target = "gb10_a_qwen_a3b"
+strong_target = "gb10_b_flash_next"
+base_threshold = 0.7
+threshold_step = 0.1
+judge_egress = "deny"
+```
+
+How it decides (a port of Switchyard's `llm_task_classifier`): the judge gets
+Switchyard's capability-forecaster prompt with the opening user instruction
+and the latest user follow-up (text only), and must answer with
+`{crux, primary_rule, capability_boundary, p_solve}`. The threshold is
+`base_threshold` plus one `threshold_step` for an `uncertain`/`unmatched`
+boundary or two for `unsupported`. If `p_solve` is at or above the threshold,
+the request goes to `weak_target`; otherwise it goes to `strong_target`. Any
+other outcome goes to `strong_target`: a judge that is down, times out
+(`YM_ROUTER_JUDGE_TIMEOUT_MS`, default 10 s) or returns malformed JSON.
+
+- The judge call adds latency to every request on the route, so use a fast
+  model. Check that it returns valid JSON with
+  `curl … -D- | grep x-yardmaster-classifier`. `reason=ambiguous` on every
+  request means the judge can't follow the schema, so try a larger judge.
+  `local_llama32` on the Strix Halo is a lighter alternative to the 12B
+  utility model, if it follows the schema.
+- Responses carry `x-yardmaster-classifier: tier=…; p_solve=…; threshold=…;
+  rule=…; boundary=…`, and the Metrics tab records `rule=judge:<boundary>`.
+  The judge's `crux` (a paraphrase of the prompt) is never logged or returned.
+- A remote judge sees every prompt, so `classifier_target` on a `remote`
+  target is refused unless `judge_egress = "allow"`.
+- `mode = "escalation"` (judge the weak answer, then maybe retry on strong) is
+  not ported yet. It runs as failure-based weak → strong.
+
+### `random`: A/B two models
+
+```toml,norun
+[routes.ab]
+id = "ab"
+type = "random"
+targets = ["gb10_b_flash_next", "gb10_a_qwen_a3b"]
+weights = [3, 1]
+```
+
+## Switchyard algorithms that need the data plane
+
+These configs pass validation today, and they are the intended mapping for
+this hardware. Add them once the Rust data plane runs them. Tiers are
+described in [plan-execute.md](plan-execute.md).
 
 ### `stage_router`: cheap model unless the conversation needs more
 
@@ -140,28 +221,6 @@ picker = "efficient_first"
 confidence_threshold = 0.6
 recent_turn_window = 3
 ```
-
-### `llm_classifier`, capability mode: a judge decides per request
-
-A small judge scores each request. Easy requests go to `qwen3.6-35b-a3b` on
-`gb10_a`; hard ones go to `qwen3.8-flash-next` on `gb10_b`. Keep
-`judge_egress = "deny"` so the classifier never sees a cloud model.
-
-```toml,norun
-[routes.classified]
-id = "classified"
-type = "llm_classifier"
-mode = "capability"
-classifier_target = "local_llama32"     # judge on Strix Halo
-weak_target = "gb10_a_qwen_a3b"
-strong_target = "gb10_b_flash_next"
-base_threshold = 0.7
-threshold_step = 0.1
-judge_egress = "deny"
-```
-
-`mode = "escalation"` uses the same judge to decide whether to escalate after
-a weak answer, instead of before the request.
 
 ### `plan_execute`: big model plans, fast model executes
 
@@ -192,16 +251,6 @@ judge_egress = "deny"
 Clients can force a tier with `X-Yardmaster-Tier: planner|worker`. This is
 the best fit for the DeepSeek Harness: plans go to `qwen3.8-flash-next` on
 `gb10_b`, and tool-call loops go to `qwen3.6-35b-a3b` on `gb10_a`.
-
-### `random`: A/B two models
-
-```toml,norun
-[routes.ab]
-id = "ab"
-type = "random"
-targets = ["gb10_b_flash_next", "gb10_a_qwen_a3b"]
-weights = [3, 1]
-```
 
 ## Hard limits
 

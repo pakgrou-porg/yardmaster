@@ -6,9 +6,13 @@
  * pick a target for a requested model, resolve its provider endpoint + key,
  * and honour `[egress]`. No I/O here — `server.mjs` does the forwarding.
  *
- * Supported route types: `passthrough` and `escalation` (weak -> strong on
- * upstream failure). A model id that matches a `[targets.*].id` is routed
- * directly (zero-config pass-through), regardless of the default route.
+ * Supported route types: `passthrough`, `escalation` (weak -> strong on
+ * upstream failure), `random` (weighted), and `llm_classifier` in capability
+ * mode (a judge picks weak or strong; ADR-0030, see classifier.mjs). A request
+ * whose `model` equals a route's `id` runs that route. A model id that matches
+ * a `[targets.*].id` is routed directly (zero-config pass-through) first.
+ * Everything else (stage_router, plan_execute, …) is the Rust data plane's
+ * job — repo issue #36 — and passes through to the route's `target`.
  *
  * Replicas (ADR-0029): several `[targets.*]` may declare the same `id` — the
  * same model served from different nodes (one GB10, the other GB10, or both
@@ -17,8 +21,6 @@
  * last), so a node that is down or busy fails over to the next. A `remote`
  * replica only ever joins a chain whose primary is itself `remote`: failover
  * never moves a prompt off the LAN on its own.
- * Everything else (stage_router, llm_classifier, plan_execute, …) is the Rust
- * data plane's job — repo issue #36 — and falls back to the default target.
  */
 
 import { parse as parseToml } from "smol-toml";
@@ -181,7 +183,7 @@ function replicaHops(name, config, health) {
  * Returns `{ ok, chain, routeName, algorithm, decisionReason }` or `{ ok:false, error }`.
  * `chain` is the ordered list of hops to try (1 for passthrough/direct, 2 for escalation).
  */
-export function resolveRoute(config, requestedModel, { health } = {}) {
+export function resolveRoute(config, requestedModel, { health, random } = {}) {
   const model = String(requestedModel || "").trim();
 
   // 1) direct model-id match -> that target and its replicas (zero-config pass-through).
@@ -199,14 +201,56 @@ export function resolveRoute(config, requestedModel, { health } = {}) {
         };
       }
     }
+    // 2) a named route (ADR-0030): Switchyard's convention, the request's
+    //    `model` is a route `id` — `"model": "classified"` runs the route whose
+    //    id is "classified". A target id of the same name wins (step 1).
+    for (const route of Object.values(config.routes || {})) {
+      if (route && typeof route === "object" && route.id === model) return evaluateRoute(route, config, { health, random });
+    }
   }
 
-  // 2) fall through to the default route.
+  // 3) fall through to the default route.
   const route = config.routes.default;
   if (!route) {
     return { ok: false, error: `model "${model}" matches no target and there is no [routes.default]` };
   }
+  return evaluateRoute(route, config, { health, random });
+}
+
+// Seeded generators for `random` routes with a `seed`, keyed by route id +
+// seed so a config reload with a new seed starts a fresh sequence.
+const seededRngs = new Map();
+function seededRandom(key, seed) {
+  if (!seededRngs.has(key)) {
+    let a = seed >>> 0;
+    seededRngs.set(key, () => {
+      // mulberry32
+      a = (a + 0x6d2b79f5) >>> 0;
+      let t = a;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    });
+  }
+  return seededRngs.get(key)();
+}
+
+/** Weighted pick of one target name; weights default to equal. */
+export function pickWeighted(targets, weights, r) {
+  const w = targets.map((_, i) => (Number.isFinite(weights?.[i]) && weights[i] > 0 ? weights[i] : weights ? 0 : 1));
+  const total = w.reduce((a, b) => a + b, 0);
+  if (total <= 0) return targets[0];
+  let x = r * total;
+  for (let i = 0; i < targets.length; i++) {
+    x -= w[i];
+    if (x < 0) return targets[i];
+  }
+  return targets[targets.length - 1];
+}
+
+function evaluateRoute(route, config, { health, random }) {
   const type = route.type || "passthrough";
+  const routeName = route.id || "default";
 
   if (type === "escalation") {
     const weak = replicaHops(route.weak_target, config, health);
@@ -215,18 +259,67 @@ export function resolveRoute(config, requestedModel, { health } = {}) {
     const chain = [];
     for (const hop of weak.hops || []) chain.push({ ...hop, escalated: false });
     for (const hop of strong.hops || []) chain.push({ ...hop, escalated: true });
-    return { ok: true, chain, routeName: route.id || "default", algorithm: "escalation", decisionReason: "escalation" };
+    return { ok: true, chain, routeName, algorithm: "escalation", decisionReason: "escalation" };
+  }
+
+  if (type === "random" && Array.isArray(route.targets) && route.targets.length) {
+    const r = Number.isInteger(route.seed) ? seededRandom(`${routeName}:${route.seed}`, route.seed) : (random ?? Math.random)();
+    const picked = pickWeighted(route.targets, Array.isArray(route.weights) ? route.weights : null, r);
+    const hops = replicaHops(picked, config, health);
+    if (hops.error) return { ok: false, error: `random route: ${hops.error}` };
+    return { ok: true, chain: hops.hops, routeName, algorithm: "random", decisionReason: `random:${picked}` };
+  }
+
+  if (type === "llm_classifier") {
+    const weak = replicaHops(route.weak_target, config, health);
+    const strong = replicaHops(route.strong_target, config, health);
+    if (weak.error && strong.error) return { ok: false, error: `llm_classifier route: ${weak.error}; ${strong.error}` };
+    const weakChain = weak.hops || [];
+    const strongChain = (strong.hops || []).map((h) => ({ ...h, escalated: true }));
+    if ((route.mode ?? "capability") !== "capability") {
+      // Escalation mode (judge the weak answer, then maybe retry strong) is
+      // not ported; degrade to failure-based weak -> strong, like `escalation`.
+      return {
+        ok: true,
+        chain: [...weakChain, ...strongChain],
+        routeName,
+        algorithm: "llm_classifier",
+        decisionReason: `llm_classifier(${route.mode}):failover`,
+      };
+    }
+    let judge = null;
+    let judgeError = null;
+    const j = route.classifier_target ? resolveTarget(route.classifier_target, config) : { error: "no classifier_target" };
+    if (j.error) judgeError = "judge target unusable";
+    else if (j.locality === "remote" && route.judge_egress !== "allow") judgeError = "judge_egress denies a remote judge";
+    else judge = j;
+    return {
+      ok: true,
+      // Fail-open default until the judge answers: the strong tier.
+      chain: strongChain.length ? strongChain : weakChain,
+      routeName,
+      algorithm: "llm_classifier",
+      decisionReason: "llm_classifier:pending",
+      classify: {
+        judge,
+        judgeError,
+        weakChain,
+        strongChain,
+        thresholds: { base_threshold: route.base_threshold, threshold_step: route.threshold_step },
+        maxTokens: Number.isInteger(route.max_output_tokens) && route.max_output_tokens > 0 ? route.max_output_tokens : undefined,
+      },
+    };
   }
 
   // passthrough (and anything not implemented here -> passthrough to `target`).
   const tgt = route.target;
-  if (!tgt) return { ok: false, error: `[routes.default] type="${type}" needs a target this router understands` };
+  if (!tgt) return { ok: false, error: `route "${routeName}" type="${type}" needs a target this router understands` };
   const r = replicaHops(tgt, config, health);
   if (r.error) return { ok: false, error: r.error };
   return {
     ok: true,
     chain: r.hops,
-    routeName: route.id || "default",
+    routeName,
     algorithm: type === "passthrough" ? "passthrough" : `passthrough(${type})`,
     decisionReason: type === "passthrough" ? "passthrough" : `fallback-from-${type}`,
   };

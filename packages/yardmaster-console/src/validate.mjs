@@ -263,6 +263,41 @@ export function validateConfig(rawText) {
     if (r.type === "passthrough" && typeof r.target !== "string") {
       errors.push(`\`${at}\`: passthrough requires \`target\``);
     }
+    // ADR-0030: what the interim Node router actually executes.
+    if (r.type === "random") {
+      if (!Array.isArray(r.targets) || r.targets.length === 0) {
+        errors.push(`\`${at}\`: random requires a non-empty \`targets\` list`);
+      } else {
+        for (const ref of r.targets) {
+          if (!(ref in targets)) errors.push(`\`${at}\` references target "${ref}" which is not defined`);
+        }
+        if (r.weights !== undefined && !(Array.isArray(r.weights) && r.weights.length === r.targets.length && r.weights.every((w) => typeof w === "number" && w >= 0))) {
+          errors.push(`\`${at}.weights\` must be non-negative numbers, one per target`);
+        }
+      }
+    }
+    if (r.type === "llm_classifier") {
+      const base = r.base_threshold ?? 0.5;
+      const step = r.threshold_step ?? 0.1;
+      if (typeof base !== "number" || base < 0 || base > 1) errors.push(`\`${at}.base_threshold\` must be between 0 and 1`);
+      if (typeof step !== "number" || step < 0) errors.push(`\`${at}.threshold_step\` must be >= 0`);
+      if (typeof base === "number" && typeof step === "number" && base + 2 * step > 1 + Number.EPSILON) {
+        errors.push(`\`${at}\`: base_threshold + 2 * threshold_step must be at most 1`);
+      }
+      if (typeof r.classifier_target !== "string") errors.push(`\`${at}\`: llm_classifier requires \`classifier_target\``);
+      else if (targetLocality[r.classifier_target] === "remote" && r.judge_egress !== "allow") {
+        errors.push(`\`${at}\`: classifier_target "${r.classifier_target}" is remote but judge_egress is not "allow" — the judge sees every prompt`);
+      }
+      if ((r.mode ?? "capability") !== "capability") {
+        warnings.push(`\`${at}\`: mode = "${r.mode}" is not run by the interim router — it falls back to weak -> strong on upstream failure`);
+      }
+    }
+    if (["stage_router", "plan_execute", "composite", "prefill_router", "noop"].includes(r.type)) {
+      warnings.push(
+        `\`${at}\`: type = "${r.type}" needs the Rust data plane — the interim router only passes through to the route's \`target\`` +
+          (typeof r.target === "string" ? "" : " (none set, so requests to it fail)"),
+      );
+    }
   }
 
   // ---- tiers --------------------------------------------------------

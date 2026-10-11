@@ -41,3 +41,4 @@ and that every row points at a file that exists.
 | [0027](0027-interim-node-router.md) | Interim Node router (`YM_DATAPLANE_MODE=router`) until the Rust data plane (#36) | accepted |
 | [0028](0028-capability-registry-pipeline.md) | Capability registry pipeline for the Harness model list | proposed |
 | [0029](0029-node-topology-and-replicas.md) | Node topology and model replicas in the capability registry | accepted |
+| [0030](0030-interim-classifier-routing.md) | Named routes, `random` and `llm_classifier` in the interim router | accepted |

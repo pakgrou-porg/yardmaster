@@ -76,8 +76,9 @@ auto-configured to route through Yardmaster.
 
 **Autorouting** is live via the interim **`YM_DATAPLANE_MODE=router`** (the
 default in this stack): a Node data plane that routes a request to a
-`[targets.*]` by matching model `id`, else the `[routes.default]` route
-(`passthrough` / `escalation`), across local Ollama, LAN vLLM, and OpenRouter —
+`[targets.*]` by matching model `id`, else a route whose `id` matches, else the
+`[routes.default]` route (`passthrough` / `escalation` / `random` /
+`llm_classifier` capability mode — [ADR-0030](decisions/0030-interim-classifier-routing.md)), across local Ollama, LAN vLLM, and OpenRouter —
 with `[egress]` enforcement, streaming, and per-request rows in the Console
 **Metrics** tab. See
 [ADR-0027](decisions/0027-interim-node-router.md).
@@ -85,7 +86,7 @@ with `[egress]` enforcement, streaming, and per-request rows in the Console
 **Not the router (still [#36](https://github.com/pakgrou-porg/yardmaster/issues/36)
 → [#26](https://github.com/pakgrou-porg/yardmaster/issues/26)):** Switchyard
 learned model-selection / `plan_execute`, PAIR GPU-pressure placement, tiers, the
-`stage_router` / `llm_classifier` route types, the `:4000` Anthropic wire
+`stage_router` route type and `llm_classifier` escalation mode, the `:4000` Anthropic wire
 protocol, cost estimation. When the Rust `yardmaster-dataplane` lands it is a
 drop-in swap (`yardmaster.toml` + the metrics schema are unchanged).
 

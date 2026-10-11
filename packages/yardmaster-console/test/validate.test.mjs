@@ -303,3 +303,50 @@ target = "a"
   ok(r, "mixed replicas");
   assert.ok(r.warnings.some((w) => w.includes('model "m" is declared on both remote and non-remote')));
 });
+
+test("ADR-0030 routes: random/llm_classifier checks and data-plane-only warnings", () => {
+  const base = `schema_version = 1
+[egress]
+allow_remote = true
+[providers.lan]
+kind = "openai_compatible"
+base_url = "http://10.0.0.11:8000/v1"
+[providers.openrouter]
+kind = "openrouter"
+api_key_env = "OPENROUTER_API_KEY"
+[targets.small]
+id = "s"
+locality = "lan"
+provider = "lan"
+[targets.big]
+id = "b"
+locality = "lan"
+provider = "lan"
+[targets.cloud]
+id = "c"
+locality = "remote"
+provider = "openrouter"
+[routes.default]
+id = "auto"
+type = "passthrough"
+target = "small"
+`;
+  const classified = `[routes.c]
+id = "classified"
+type = "llm_classifier"
+mode = "capability"
+classifier_target = "small"
+weak_target = "small"
+strong_target = "big"
+base_threshold = 0.7
+threshold_step = 0.1
+`;
+  ok(validateConfig(base + classified), "classifier");
+  hasErr(validateConfig(base + classified.replace("threshold_step = 0.1", "threshold_step = 0.3")), "at most 1");
+  hasErr(validateConfig(base + classified.replace('classifier_target = "small"', 'classifier_target = "cloud"')), "judge_egress");
+  hasErr(validateConfig(base + `[routes.r]\nid = "ab"\ntype = "random"\ntargets = ["small", "nope"]\n`), 'references target "nope"');
+  hasErr(validateConfig(base + `[routes.r]\nid = "ab"\ntype = "random"\ntargets = ["small", "big"]\nweights = [1]\n`), "one per target");
+  const staged = validateConfig(base + `[routes.s]\nid = "staged"\ntype = "stage_router"\ncapable_target = "big"\nefficient_target = "small"\n`);
+  ok(staged, "stage_router still validates");
+  assert.ok(staged.warnings.some((w) => w.includes("needs the Rust data plane") && w.includes("requests to it fail")));
+});
