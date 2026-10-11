@@ -24,7 +24,8 @@
 #      shows "Disconnected", 403 on every /api call),
 #      YM_HARNESS_DEFAULT_MODEL (fallback for [harness].default_model),
 #      YM_AUTH_USER / YM_AUTH_PASS (pre-seed; else a one-time setup page),
-#      YM_AUTH_DISABLED=1 (loopback dev only), OPENROUTER_API_KEY.
+#      YM_AUTH_DISABLED=1 (loopback dev only), OPENROUTER_API_KEY,
+#      YM_GB10_API_KEY (keyed LAN vLLM, via api_key_env).
 #
 # AUTH IS ON BY DEFAULT — one admin credential (scrypt hash on the data volume)
 # protects both the Console and the Harness. GPU box (ROCm/CUDA): see
@@ -93,6 +94,7 @@ services:
       YM_AUTH_PASS: "${YM_AUTH_PASS:-}"
       YM_AUTH_DISABLED: "${YM_AUTH_DISABLED:-}"
       OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
+      YM_GB10_API_KEY: "${YM_GB10_API_KEY:-}"
     volumes:
       - yardmaster-data:/data
       - yardmaster-harness:/dshhome                 # rw: writes the Harness's model list (ADR-0028)

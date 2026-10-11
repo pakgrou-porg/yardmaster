@@ -7,9 +7,10 @@
 #   - bind-mount it read-only at /config/yardmaster.toml on the `yardmaster`
 #     service (uncomment the mount in the stack).
 #
-# Local + LAN engines need no API key. OpenRouter is the only keyed provider;
-# its key comes from the OPENROUTER_API_KEY environment variable (passed into the
-# `yardmaster` service by the stack) and is NEVER written to this file.
+# Local Ollama and gb10_a need no API key. gb10_b (vLLM started with
+# --api-key) and OpenRouter are keyed; their keys come from the
+# YM_GB10_API_KEY and OPENROUTER_API_KEY environment variables (passed into the
+# `yardmaster` service by the stack) and are NEVER written to this file.
 #
 # Routing stays on the LAN by default: `[routes.default]` sends unnamed
 # requests to the GB10s. The OpenRouter models are reached only when a request names one
@@ -88,6 +89,7 @@ provider = "local_ollama"
 [providers.gb10_b_vllm]
 kind = "openai_compatible"
 base_url = "http://10.116.2.120:8000/v1"
+api_key_env = "YM_GB10_API_KEY"   # same value as VLLM_API_KEY on susa; delete if it has none
 nodes = ["gb10_b"]
 
 [providers.gb10_a_vllm]
