@@ -152,8 +152,10 @@ Start from [`../deploy/portainer/yardmaster.toml.example`](../deploy/portainer/y
 You can paste/edit it in the Console (Config tab, saves to the data volume) or
 bind-mount it (see the commented mount in the stack).
 
-- **Local Ollama and LAN vLLM** providers need **no API key** — just a
-  `base_url`. Private-range hosts may use plain `http`.
+- **Local Ollama and LAN vLLM** providers need only a `base_url`.
+  Private-range hosts may use plain `http`. A vLLM started with `--api-key`
+  (`gb10_b` in the example) also needs `api_key_env = "YM_GB10_API_KEY"`, and
+  the stack forwards that variable.
 - **OpenRouter** is the only keyed provider. Its key comes from the
   `OPENROUTER_API_KEY` environment variable (the stack passes it into the
   `yardmaster` service) and is **never written to the file**. `[egress]
@@ -189,6 +191,7 @@ mistakes. For how requests get routed across the boxes, see
    | `YM_LAN_HOST` | — | `10.116.2.145` (your IP) |
    | `YM_HARNESS_DEFAULT_MODEL` | `deepseek-r1:32b` (default) | any model Yardmaster can route — fallback for `[harness].default_model` |
    | `OPENROUTER_API_KEY` | your key | — |
+   | `YM_GB10_API_KEY` | the `VLLM_API_KEY` set on `gb10_b` | — |
    | `YM_AUTH_USER` / `YM_AUTH_PASS` | *(optional)* leave unset to use the browser setup page | — |
 
 3. **Deploy.** The first build compiles the Go workers + bundles the Console
@@ -498,6 +501,7 @@ Set on the `ollama` service (defaults in the stack are sane):
 | `GET /v1/capabilities` shows a model stuck `pending_ops` and never applied | destructive changes (a removal not caused by an operator override, or a default change not caused by explicit `[harness]`/`[routes.default]` config) are held for approval by design (ADR-0028, additive-only auto-apply). Review the op, then `POST /v1/capabilities/apply` (or fix `yardmaster.toml` so the change becomes operator-driven and reconcile again). |
 | router: `model "X" matches no target and there is no [routes.default]` | add a `[targets.*]` with `id = "X"`, or a `[routes.default]` — then Save in the Console (the router hot-reloads). |
 | router: `provider "openrouter": OPENROUTER_API_KEY is not set` | set `OPENROUTER_API_KEY` in the stack env and redeploy. |
+| router: `provider "gb10_b_vllm": YM_GB10_API_KEY is not set`, or HTTP 401 from `gb10_b` | set `YM_GB10_API_KEY` in the stack env to the box's `VLLM_API_KEY` and redeploy. |
 | router: `all upstreams failed` for a LAN vLLM model | check the `base_url` in `yardmaster.toml` and that `curl <base_url>/models` works from the `yardmaster` container. |
 | `curl :11435/healthz` shows `mode: proxy` (not `router`) | `YM_DATAPLANE_MODE` isn't `router` — set it in the stack env and redeploy. |
 | Metrics tab still empty | the router writes a row per request — send one; confirm `YM_METRICS_DB` points into `/data` and the volume is writable. |
