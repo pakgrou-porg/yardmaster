@@ -59,26 +59,26 @@ still returns 429/503 after retries, the request moves to `gb10_b`. A replica
 the registry last probed as unreachable is tried last. Failover never moves a
 request to a cloud copy of the same id.
 
-### 2. Decide how to use the GB10s
+### 2. Split the work across the boxes
 
-The two GB10s share 256 GB between them. Pick one mode per model; don't load
-the same weights both ways at full size.
+Each GB10 runs its own vLLM with its own models (128 GB each); nothing is
+sharded over the QSFP link. Two useful patterns, mixable per model:
 
-| Mode | When | Config |
-| --- | --- | --- |
-| **Independent + replicated** | model fits in 128 GB (dense ≤ ~70B at FP8, MoE ≤ ~120B at FP4) | one vLLM per GB10, same `id` on both → throughput + failover |
-| **Independent, different models** | you want more distinct models online | one vLLM per GB10, different ids |
-| **Spanned** | model needs > 128 GB | one vLLM + Ray across both (TP=2 over QSFP), served from the head node; `[providers.gb10_pair_vllm] nodes = ["gb10_a", "gb10_b"]` |
+- **Replicated**: the same model id on both GB10s. Throughput plus failover.
+  Use it for the model the Harness and agents hit hardest.
+- **Specialized**: different models per GB10, for example a fast mid-size
+  model on `gb10_a` and the largest model that fits in 128 GB on `gb10_b`.
+  This gives more distinct models online, with no failover for those ids.
 
-Strix Halo (Ollama/ROCm) handles small, always-on models: utility, judge,
-embeddings, the Harness's cheap default. GB10 prefill is much faster, so put
-long-context and agentic work there.
+The Strix Halo is also the desktop (Claude Desktop runs there), so keep its
+Ollama models small: utility, judge, embeddings, and a last-resort fallback.
+GB10 prefill is much faster, so put long-context and agentic work there.
 
 ### 3. Pick the default route
 
 Anything whose `model` is not a declared id (for example `"model": "auto"`)
-follows `[routes.default]`. To stay entirely on the LAN, with the big engine
-as backstop:
+follows `[routes.default]`. To stay entirely on the LAN, with Strix Halo as
+backstop:
 
 ```toml,norun
 [routes.default]
@@ -108,8 +108,7 @@ curl -s http://<strix-ip>:11435/v1/capabilities | jq '.records[] | {id, reachabi
 ```
 
 The Console's **Capabilities** tab shows the same information in its
-**placement** column (`gb10_a | gb10_b`, `gb10_a+gb10_b (qsfp)`, `✗` on a down
-replica). The **Metrics** tab shows `failover_count` per request.
+**placement** column (`gb10_a | gb10_b`, `✗` on a down replica). The **Metrics** tab shows `failover_count` per request.
 
 ## Switchyard algorithms on this hardware (once the data plane runs them)
 
@@ -137,8 +136,8 @@ recent_turn_window = 3
 
 ### `llm_classifier`, capability mode: a judge decides per request
 
-A small judge on the Strix Halo scores each request. Easy requests go to one
-GB10; hard ones go to the spanned engine. Keep `judge_egress = "deny"` so the
+A small judge on the Strix Halo scores each request. Easy requests go to the
+replicated mid-size model; hard ones go to the largest model on `gb10_b`. Keep `judge_egress = "deny"` so the
 classifier never sees a cloud model.
 
 ```toml,norun
@@ -148,7 +147,7 @@ type = "llm_classifier"
 mode = "capability"
 classifier_target = "local_llama32"     # judge on Strix Halo
 weak_target = "gb10_a_qwen_a3b"
-strong_target = "gb10_pair_big"         # spans both GB10s
+strong_target = "gb10_b_large"          # declare: largest model that fits on gb10_b
 base_threshold = 0.7
 threshold_step = 0.1
 judge_egress = "deny"
@@ -162,7 +161,7 @@ a weak answer, instead of before the request.
 ```toml,norun
 [tiers.planner]
 role = "planner"
-models = ["qwen3.8-235b-a22b", "qwen3.6-35b-a3b"]   # pair first, single GB10 fallback
+models = ["<largest model on gb10_b>", "qwen3.6-35b-a3b"]   # gb10_b first, replicated model fallback
 
 [tiers.worker]
 role = "worker"
@@ -184,8 +183,8 @@ judge_egress = "deny"
 ```
 
 Clients can force a tier with `X-Yardmaster-Tier: planner|worker`. This is
-the best fit for the DeepSeek Harness: plans go to the spanned GB10 engine and
-tool-call loops to a single GB10.
+the best fit for the DeepSeek Harness: plans go to the large model on
+`gb10_b`, and tool-call loops go to the replicated model.
 
 ### `random`: A/B two models
 
@@ -202,10 +201,7 @@ weights = [3, 1]
 - Replica order is declaration order. There is no load- or memory-aware
   balancing until PAIR `vram_aware` placement
   ([#33](https://github.com/pakgrou-porg/yardmaster/issues/33)) exists.
-- A GB10 that is part of the spanned engine is down whenever either node is
-  down. Replicas on the single-node servers keep working only if those
-  servers are still running.
-- The router does not start or stop vLLM. Switching a GB10 between
-  "independent" and "spanned" is done on the GB10s themselves. The registry
-  notices within one reconcile interval (`YM_CAPABILITIES_RECONCILE_S`,
-  default 60 s).
+- A model on only one GB10 has no failover. Replicate it if that matters.
+- The router does not start or stop vLLM, or move models between boxes. The
+  registry notices model changes within one reconcile interval
+  (`YM_CAPABILITIES_RECONCILE_S`, default 60 s).

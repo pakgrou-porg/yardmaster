@@ -44,9 +44,9 @@ prometheus = true
 # ADR-0029. Where engines physically run. Optional and informational, except
 # that it powers placement in /v1/capabilities, the Console's Capabilities
 # tab, and the x-yardmaster-nodes response header. `fabric` names a dedicated
-# interconnect; nodes sharing one can host a single engine sharded across them.
+# interconnect between nodes (informational unless an engine spans them).
 [nodes.strix]
-accelerator = "strix_halo"   # Radeon 8060S, ROCm
+accelerator = "strix_halo"   # Radeon 8060S, ROCm; also the desktop (Claude Desktop etc.)
 memory_gb = 128
 
 [nodes.gb10_a]
@@ -108,19 +108,8 @@ id = "gemma-4-12b-utility"
 locality = "lan"
 provider = "gb10_b_vllm"
 
-# One engine across both GB10s (vLLM + Ray, tensor/pipeline parallel over the
-# QSFP link) for models that need up to ~256 GB. The API is served by the Ray
-# head node. Uncomment once that engine is running. Memory spent on it is not
-# available to the single-node servers above, so don't run both at full size.
-# [providers.gb10_pair_vllm]
-# kind = "openai_compatible"
-# base_url = "http://10.116.2.56:8010/v1"
-# nodes = ["gb10_a", "gb10_b"]
-#
-# [targets.gb10_pair_big]
-# id = "qwen3.8-235b-a22b"
-# locality = "lan"
-# provider = "gb10_pair_vllm"
+# Each GB10 runs its own models; nothing is sharded across the QSFP link. To
+# span one engine across both later, give a provider nodes = ["gb10_a", "gb10_b"].
 
 # ------------------------------------------------------------------- OpenRouter
 # Cloud fallback. Keyed via env (OPENROUTER_API_KEY). Reached only when a request

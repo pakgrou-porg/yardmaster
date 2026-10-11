@@ -164,9 +164,8 @@ The shipped example already contains the six OpenRouter targets
 (`openai/gpt-5.6-terra`, `openai/gpt-6-astra`, `qwen/qwen3.8-max-0902`,
 `deepseek/deepseek-v4-flash-vision-exp`, `qwen/qwen3.8-flash`,
 `anthropic/claude-sonnet-5`), local `llama3.2:latest` + `deepseek-r1:32b`, and
-two GB10 vLLM nodes described with `[nodes.*]` (one model replicated on both
-for failover, plus a commented-out engine spanning both over their QSFP link;
-[ADR-0029](decisions/0029-node-topology-and-replicas.md)). Adjust addresses /
+two GB10 vLLM nodes described with `[nodes.*]`, with one model replicated on
+both for failover ([ADR-0029](decisions/0029-node-topology-and-replicas.md)). Adjust addresses /
 model ids to your network. The Console's **Validate** button catches schema
 mistakes. For how requests get routed across the boxes, see
 [autorouting.md](autorouting.md).
