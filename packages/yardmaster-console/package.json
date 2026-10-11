@@ -1,6 +1,6 @@
 {
   "name": "@pakgrou-porg/yardmaster-console",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Loopback web console to configure and observe Yardmaster (config editor + validator, live backend probes, metrics view) and reach the DeepSeek Harness Web UI, before a full console is deployed over it.",
   "license": "Apache-2.0",
   "author": "Karl Miller",

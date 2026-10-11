@@ -9,6 +9,14 @@
  * Supported route types: `passthrough` and `escalation` (weak -> strong on
  * upstream failure). A model id that matches a `[targets.*].id` is routed
  * directly (zero-config pass-through), regardless of the default route.
+ *
+ * Replicas (ADR-0029): several `[targets.*]` may declare the same `id` — the
+ * same model served from different nodes (one GB10, the other GB10, or both
+ * spanned over their dedicated fabric). A hop for that id becomes an ordered
+ * chain over every replica (declaration order, last-known-unreachable ones
+ * last), so a node that is down or busy fails over to the next. A `remote`
+ * replica only ever joins a chain whose primary is itself `remote`: failover
+ * never moves a prompt off the LAN on its own.
  * Everything else (stage_router, llm_classifier, plan_execute, …) is the Rust
  * data plane's job — repo issue #36 — and falls back to the default target.
  */
@@ -38,6 +46,7 @@ export function parseConfig(rawText) {
       routes: {},
       egress: {},
       harness: {},
+      nodes: {},
     };
   }
   const providers = doc.providers ?? {};
@@ -51,7 +60,11 @@ export function parseConfig(rawText) {
     allow_lan: (doc.egress ?? {}).allow_lan !== false, // default true
   };
   const harness = doc.harness && typeof doc.harness === "object" ? doc.harness : {};
-  return { ok: true, errors: [], providers, targets, routes, egress, harness };
+  const nodes = {};
+  for (const [k, v] of Object.entries(doc.nodes ?? {})) {
+    if (v && typeof v === "object" && !Array.isArray(v)) nodes[k] = v;
+  }
+  return { ok: true, errors: [], providers, targets, routes, egress, harness, nodes };
 }
 
 /** `cluster` | `lan` | `remote` -> is egress to it allowed by `[egress]`? */
@@ -85,6 +98,30 @@ export function providerEndpoint(providerName, providers) {
   return { baseUrl, chatUrl, apiKey, kind, engineKind };
 }
 
+/**
+ * Where a provider's engine physically runs (ADR-0029): the `[nodes.*]` its
+ * `nodes = [...]` list names, summarized. `span` is "multi" for one engine
+ * sharded across several nodes (e.g. vLLM tensor-parallel over the GB10s'
+ * QSFP link), "single" otherwise. `fabric` is the interconnect the nodes
+ * share, or null when they don't share one. Null when the provider declares
+ * no nodes (cloud providers, or a config that predates `[nodes]`).
+ */
+export function providerPlacement(providerName, config) {
+  const p = config.providers?.[providerName];
+  const names = Array.isArray(p?.nodes) ? p.nodes.filter((n) => typeof n === "string" && n) : [];
+  if (!names.length) return null;
+  const known = names.map((n) => config.nodes?.[n]).filter(Boolean);
+  const fabrics = new Set(known.map((n) => (typeof n.fabric === "string" && n.fabric ? n.fabric : null)));
+  const memory = known.map((n) => n.memory_gb).filter(Number.isFinite);
+  return {
+    nodes: names,
+    span: names.length > 1 ? "multi" : "single",
+    accelerators: [...new Set(known.map((n) => n.accelerator).filter((a) => typeof a === "string" && a))],
+    memory_gb: memory.length ? memory.reduce((a, b) => a + b, 0) : null,
+    fabric: names.length > 1 && fabrics.size === 1 ? [...fabrics][0] : null,
+  };
+}
+
 /** Resolve one `[targets.*]` name into a concrete hop, or `{ error }`. */
 function resolveTarget(name, config) {
   const t = config.targets[name];
@@ -106,7 +143,37 @@ function resolveTarget(name, config) {
     engineKind: ep.engineKind,
     extraBody: t.extra_body && typeof t.extra_body === "object" ? t.extra_body : null,
     extraHeaders: t.extra_headers && typeof t.extra_headers === "object" ? t.extra_headers : null,
+    nodes: providerPlacement(t.provider, config)?.nodes ?? null,
   };
+}
+
+/**
+ * Every target serving the same model id as `name` (ADR-0029 replicas), as
+ * resolved hops: `name` first, then the others in declaration order, then any
+ * whose last probe said unreachable moved to the back (still tried — a probe
+ * can be up to one reconcile interval stale). `health` is an optional
+ * `Map<targetName, reachability>` from the capability registry.
+ */
+function replicaHops(name, config, health) {
+  const t = config.targets[name];
+  if (!t) return { error: `target "${name}" is not defined` };
+  const primaryRemote = (t.locality || "cluster") === "remote";
+  const names = [name];
+  for (const [n, other] of Object.entries(config.targets)) {
+    if (n === name || other?.id !== t.id) continue;
+    if (!primaryRemote && other.locality === "remote") continue; // never fail over off the LAN
+    names.push(n);
+  }
+  const hops = [];
+  let firstError = null;
+  for (const n of names) {
+    const hop = resolveTarget(n, config);
+    if (hop.error) firstError ??= hop.error;
+    else hops.push(hop);
+  }
+  if (!hops.length) return { error: firstError };
+  const down = (h) => health?.get(h.targetName) === "unreachable";
+  return { hops: [...hops.filter((h) => !down(h)), ...hops.filter(down)] };
 }
 
 /**
@@ -114,18 +181,18 @@ function resolveTarget(name, config) {
  * Returns `{ ok, chain, routeName, algorithm, decisionReason }` or `{ ok:false, error }`.
  * `chain` is the ordered list of hops to try (1 for passthrough/direct, 2 for escalation).
  */
-export function resolveRoute(config, requestedModel) {
+export function resolveRoute(config, requestedModel, { health } = {}) {
   const model = String(requestedModel || "").trim();
 
-  // 1) direct model-id match -> that target (zero-config pass-through).
+  // 1) direct model-id match -> that target and its replicas (zero-config pass-through).
   if (model) {
     for (const [name, t] of Object.entries(config.targets)) {
       if (t.id === model) {
-        const hop = resolveTarget(name, config);
-        if (hop.error) return { ok: false, error: hop.error };
+        const r = replicaHops(name, config, health);
+        if (r.error) return { ok: false, error: r.error };
         return {
           ok: true,
-          chain: [{ ...hop, model }],
+          chain: r.hops.map((hop) => ({ ...hop, model })),
           routeName: "model-name",
           algorithm: "passthrough",
           decisionReason: "model-name",
@@ -142,23 +209,23 @@ export function resolveRoute(config, requestedModel) {
   const type = route.type || "passthrough";
 
   if (type === "escalation") {
-    const weak = resolveTarget(route.weak_target, config);
-    const strong = resolveTarget(route.strong_target, config);
+    const weak = replicaHops(route.weak_target, config, health);
+    const strong = replicaHops(route.strong_target, config, health);
     if (weak.error && strong.error) return { ok: false, error: `escalation route: ${weak.error}; ${strong.error}` };
     const chain = [];
-    if (!weak.error) chain.push({ ...weak, model: weak.model });
-    if (!strong.error) chain.push({ ...strong, model: strong.model });
+    for (const hop of weak.hops || []) chain.push({ ...hop, escalated: false });
+    for (const hop of strong.hops || []) chain.push({ ...hop, escalated: true });
     return { ok: true, chain, routeName: route.id || "default", algorithm: "escalation", decisionReason: "escalation" };
   }
 
   // passthrough (and anything not implemented here -> passthrough to `target`).
   const tgt = route.target;
   if (!tgt) return { ok: false, error: `[routes.default] type="${type}" needs a target this router understands` };
-  const hop = resolveTarget(tgt, config);
-  if (hop.error) return { ok: false, error: hop.error };
+  const r = replicaHops(tgt, config, health);
+  if (r.error) return { ok: false, error: r.error };
   return {
     ok: true,
-    chain: [{ ...hop, model: hop.model }],
+    chain: r.hops,
     routeName: route.id || "default",
     algorithm: type === "passthrough" ? "passthrough" : `passthrough(${type})`,
     decisionReason: type === "passthrough" ? "passthrough" : `fallback-from-${type}`,

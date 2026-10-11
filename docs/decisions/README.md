@@ -40,3 +40,4 @@ and that every row points at a file that exists.
 | [0026](0026-three-container-stack-and-first-run-auth.md) | Three-container stack, bundled Console, first-run admin credential | accepted |
 | [0027](0027-interim-node-router.md) | Interim Node router (`YM_DATAPLANE_MODE=router`) until the Rust data plane (#36) | accepted |
 | [0028](0028-capability-registry-pipeline.md) | Capability registry pipeline for the Harness model list | proposed |
+| [0029](0029-node-topology-and-replicas.md) | Node topology and model replicas in the capability registry | accepted |

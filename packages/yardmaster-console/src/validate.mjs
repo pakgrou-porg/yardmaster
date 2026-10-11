@@ -28,6 +28,7 @@ const TOP_LEVEL_KEYS = new Set([
   "metrics",
   "tiers",
   "harness",
+  "nodes",
 ]);
 
 const TARGET_KEYS = new Set([
@@ -36,14 +37,24 @@ const TARGET_KEYS = new Set([
 ]);
 // [harness] — the DeepSeek Harness capability registry (ADR-0028).
 const HARNESS_KEYS = new Set(["default_model", "policy", "overrides"]);
-const HARNESS_POLICY_KEYS = new Set(["deny_glob", "min_context_window", "rank_by_locality", "smoke_test", "smoke_test_interval_s"]);
-const HARNESS_OVERRIDE_KEYS = new Set(["enabled", "rank", "context_window", "capabilities", "default"]);
+const HARNESS_POLICY_KEYS = new Set([
+  "deny_glob",
+  "min_context_window",
+  "rank_by_locality",
+  "smoke_test",
+  "smoke_test_interval_s",
+  "require_approval",
+]);
+const HARNESS_OVERRIDE_KEYS = new Set(["enabled", "rank", "context_window", "capabilities", "default", "approved"]);
 const HARNESS_CAPABILITY_FLAGS = new Set(["tools", "vision", "reasoning"]);
 const LOCALITIES_FOR_RANK = new Set(["cluster", "lan", "remote"]);
 const PROVIDER_KEYS = new Set([
   "kind", "base_url", "api_key_env", "api_key_ref", "models_allow", "models_deny",
   "rate_limit_rpm", "budget_usd_per_day", "timeout_s", "pricing", "media",
+  "nodes",
 ]);
+// [nodes.<name>] — the physical machines engines run on (ADR-0029).
+const NODE_KEYS = new Set(["accelerator", "memory_gb", "fabric"]);
 const PROVIDER_KINDS = new Set(["openrouter", "venice", "kie", "openai_compatible"]);
 const KEYED_PROVIDER_KINDS = new Set(["openrouter", "venice", "kie"]);
 const ROUTE_TYPES = new Set([
@@ -105,12 +116,50 @@ export function validateConfig(rawText) {
   const allowRemote = egress.allow_remote === true;
   const allowLan = egress.allow_lan !== false; // default true
 
+  // ---- nodes (ADR-0029) ----------------------------------------------------
+  const nodes = doc.nodes ?? {};
+  for (const [name, n] of Object.entries(nodes)) {
+    const at = `nodes.${name}`;
+    if (n === null || typeof n !== "object" || Array.isArray(n)) {
+      errors.push(`\`${at}\` must be a table`);
+      continue;
+    }
+    for (const k of Object.keys(n)) {
+      if (!NODE_KEYS.has(k)) errors.push(`unknown key \`${at}.${k}\``);
+    }
+    if (n.accelerator !== undefined && !(typeof n.accelerator === "string" && n.accelerator)) {
+      errors.push(`\`${at}.accelerator\` must be a non-empty string`);
+    }
+    if (n.memory_gb !== undefined && !(typeof n.memory_gb === "number" && n.memory_gb > 0)) {
+      errors.push(`\`${at}.memory_gb\` must be a positive number`);
+    }
+    if (n.fabric !== undefined && !(typeof n.fabric === "string" && n.fabric)) {
+      errors.push(`\`${at}.fabric\` must be a non-empty string`);
+    }
+  }
+
   // ---- providers ---------------------------------------------------------
   const providers = doc.providers ?? {};
   for (const [name, p] of Object.entries(providers)) {
     const at = `providers.${name}`;
     for (const k of Object.keys(p)) {
       if (!PROVIDER_KEYS.has(k)) errors.push(`unknown key \`${at}.${k}\``);
+    }
+    if (p.nodes !== undefined) {
+      if (!(Array.isArray(p.nodes) && p.nodes.length > 0 && p.nodes.every((n) => typeof n === "string" && n))) {
+        errors.push(`\`${at}.nodes\` must be a non-empty list of [nodes.*] names`);
+      } else {
+        for (const n of p.nodes) {
+          if (!(n in nodes)) errors.push(`\`${at}.nodes\` names "${n}" which has no matching [nodes.${n}]`);
+        }
+        if (new Set(p.nodes).size !== p.nodes.length) errors.push(`\`${at}.nodes\` lists a node twice`);
+        const fabrics = new Set(p.nodes.map((n) => nodes[n]?.fabric));
+        if (p.nodes.length > 1 && (fabrics.size !== 1 || fabrics.has(undefined))) {
+          warnings.push(
+            `\`${at}\` spans ${p.nodes.length} nodes that don't share a [nodes.*].fabric — a sharded engine over the general LAN will be slow`,
+          );
+        }
+      }
     }
     const kind = p.kind;
     if (kind === undefined) {
@@ -168,6 +217,27 @@ export function validateConfig(rawText) {
     }
     if (t.provider !== undefined && !(t.provider in providers)) {
       errors.push(`\`${at}.provider\` = "${t.provider}" has no matching [providers.${t.provider}]`);
+    }
+  }
+
+  // Replicas (ADR-0029): the same id on several targets is fine — the router
+  // fails over between them. Mixing remote with non-remote is almost always a
+  // mistake: a LAN-primary chain never fails over to the remote copy, and a
+  // remote-primary one (declared first) sends every request off the LAN first.
+  const localitiesById = new Map();
+  for (const [name, t] of Object.entries(targets)) {
+    if (!t || typeof t !== "object" || typeof t.id !== "string") continue;
+    const set = localitiesById.get(t.id) ?? new Map();
+    set.set(name, t.locality ?? "cluster");
+    localitiesById.set(t.id, set);
+  }
+  for (const [id, byName] of localitiesById) {
+    const locs = [...byName.values()];
+    if (locs.includes("remote") && locs.some((l) => l !== "remote")) {
+      warnings.push(
+        `model "${id}" is declared on both remote and non-remote targets (${[...byName.keys()].join(", ")}) — ` +
+          "whichever is declared first is the primary; a LAN primary never fails over to the remote copy",
+      );
     }
   }
 
@@ -242,6 +312,9 @@ export function validateConfig(rawText) {
     if (policy.smoke_test_interval_s !== undefined && !(Number.isInteger(policy.smoke_test_interval_s) && policy.smoke_test_interval_s > 0)) {
       errors.push("`harness.policy.smoke_test_interval_s` must be a positive integer");
     }
+    if (policy.require_approval !== undefined && typeof policy.require_approval !== "boolean") {
+      errors.push("`harness.policy.require_approval` must be a boolean");
+    }
     const overrides = h.overrides ?? {};
     let defaultOverrides = 0;
     for (const [id, ov] of Object.entries(overrides)) {
@@ -255,6 +328,7 @@ export function validateConfig(rawText) {
         if (!HARNESS_OVERRIDE_KEYS.has(k)) errors.push(`unknown key \`${at}.${k}\``);
       }
       if (ov.enabled !== undefined && typeof ov.enabled !== "boolean") errors.push(`\`${at}.enabled\` must be a boolean`);
+      if (ov.approved !== undefined && typeof ov.approved !== "boolean") errors.push(`\`${at}.approved\` must be a boolean`);
       if (ov.rank !== undefined && typeof ov.rank !== "number") errors.push(`\`${at}.rank\` must be a number`);
       if (ov.context_window !== undefined && !(Number.isInteger(ov.context_window) && ov.context_window > 0)) {
         errors.push(`\`${at}.context_window\` must be a positive integer`);

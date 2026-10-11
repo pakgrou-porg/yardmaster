@@ -20,6 +20,12 @@
  *   POST /api/capabilities/apply     proxy: approve every held (pending) op
  *   POST /api/capabilities/override  body: {id, patch} -> upsert [harness.overrides.<id>],
  *                                    validate, save (same gate as PUT /api/config)
+ *   POST /api/capabilities/policy    body: {patch} -> upsert [harness.policy] (e.g. the
+ *                                    "Require approval for new models" toggle, ADR-0028 P4)
+ *   POST /api/capabilities/approve-live  grandfather every currently-applied model with
+ *                                    an `approved = true` override in one write — run once
+ *                                    right after turning require_approval on so the
+ *                                    existing live list doesn't evaporate
  *   GET  /  (and static assets)      the SPA
  *
  * Binds 127.0.0.1 by default. Set YM_CONSOLE_BIND=0.0.0.0 to serve the LAN; when
@@ -44,7 +50,7 @@ import { execFile } from "node:child_process";
 import { validateConfig } from "./validate.mjs";
 import { probeBackends } from "./backends.mjs";
 import { readMetrics } from "./metrics.mjs";
-import { upsertHarnessOverride } from "./toml-overrides.mjs";
+import { upsertHarnessOverride, upsertHarnessPolicy } from "./toml-overrides.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PUBLIC = join(HERE, "..", "public");
@@ -406,6 +412,47 @@ async function handleApi(req, res, url) {
     const next = upsertHarnessOverride(raw, id, patch);
     const r = await saveConfig(next);
     return json(res, r.status, r.body);
+  }
+
+  // Set [harness.policy] keys directly — used for the "Require approval for
+  // new models" toggle (ADR-0028 P4), but generic over any policy key.
+  if (url.pathname === "/api/capabilities/policy" && req.method === "POST") {
+    let body;
+    try {
+      body = JSON.parse(await readBody(req));
+    } catch {
+      return json(res, 400, { written: false, errors: ["invalid JSON body"] });
+    }
+    const patch = body.patch && typeof body.patch === "object" ? body.patch : null;
+    if (!patch || Object.keys(patch).length === 0) {
+      return json(res, 400, { written: false, errors: ["body must be { patch: {...} }"] });
+    }
+    const { raw } = await loadConfig();
+    const next = upsertHarnessPolicy(raw, patch);
+    const r = await saveConfig(next);
+    return json(res, r.status, r.body);
+  }
+
+  // Grandfather every currently-live model in one write: for each id in the
+  // registry's *applied* set (what dsh is actually offering right now) that
+  // hasn't been explicitly approved or rejected, set `approved = true`. Lets
+  // an operator flip on [harness.policy] require_approval without their
+  // existing model list evaporating out from under them — new discoveries
+  // after this point still land in "pending" same as always; only the
+  // already-live set gets bulk-approved.
+  if (url.pathname === "/api/capabilities/approve-live" && req.method === "POST") {
+    const r = await fetchRouter("/v1/capabilities");
+    if (!r) return json(res, 502, { error: `router unreachable at ${cfg.routerUrl}` });
+    const appliedIds = new Set((r.body.applied || []).map((e) => e.id));
+    const toApprove = (r.body.records || [])
+      .filter((rec) => appliedIds.has(rec.id) && rec.approval !== "approved" && rec.approval !== "not_required")
+      .map((rec) => rec.id);
+    if (toApprove.length === 0) return json(res, 200, { written: false, approved: [], note: "nothing needed grandfathering" });
+    const { raw } = await loadConfig();
+    let next = raw;
+    for (const id of toApprove) next = upsertHarnessOverride(next, id, { approved: true });
+    const result = await saveConfig(next);
+    return json(res, result.status, { ...result.body, approved: toApprove });
   }
 
   if (url.pathname === "/api/metrics" && req.method === "GET") {

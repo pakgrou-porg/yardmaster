@@ -151,21 +151,29 @@ Start from [`../deploy/portainer/yardmaster.toml.example`](../deploy/portainer/y
 You can paste/edit it in the Console (Config tab, saves to the data volume) or
 bind-mount it (see the commented mount in the stack).
 
-- **Local Ollama and LAN vLLM** providers need **no API key** — just a
-  `base_url`. Private-range hosts may use plain `http`.
+- **Local Ollama and LAN vLLM** providers need only a `base_url`.
+  Private-range hosts may use plain `http`. A vLLM started with `--api-key`
+  (`gb10_b` in the example) also needs `api_key_env = "YM_GB10_API_KEY"`, and
+  the stack forwards that variable.
 - **OpenRouter** is the only keyed provider. Its key comes from the
   `OPENROUTER_API_KEY` environment variable (the stack passes it into the
   `yardmaster` service) and is **never written to the file**. `[egress]
   allow_remote = true` is required for the `locality = "remote"` targets to load;
-  default routing is still `[routes.default] → local`, so the OpenRouter models
+  default routing still stays on the LAN (`[routes.default]` → GB10s), so the OpenRouter models
   are used **only when a request names their slug**.
 
 The shipped example already contains the six OpenRouter targets
 (`openai/gpt-5.6-terra`, `openai/gpt-6-astra`, `qwen/qwen3.8-max-0902`,
 `deepseek/deepseek-v4-flash-vision-exp`, `qwen/qwen3.8-flash`,
 `anthropic/claude-sonnet-5`), local `llama3.2:latest` + `deepseek-r1:32b`, and
-two LAN vLLM nodes. Adjust addresses / model ids to your network. The Console's
-**Validate** button catches schema mistakes.
+two GB10 vLLM nodes described with `[nodes.*]`
+([ADR-0029](decisions/0029-node-topology-and-replicas.md)): `gb10_b` dedicated
+to `qwen3.8-flash-next`, `gb10_a` running `qwen3.6-35b-a3b` and
+`gemma-4-12b-utility`. Unnamed requests go to `gb10_b`, then `gb10_a`, and
+the Harness defaults to `qwen3.8-flash-next`. Adjust addresses /
+model ids to your network. The Console's **Validate** button catches schema
+mistakes. For how requests get routed across the boxes, see
+[autorouting.md](autorouting.md).
 
 ---
 
@@ -182,6 +190,7 @@ two LAN vLLM nodes. Adjust addresses / model ids to your network. The Console's
    | `YM_LAN_HOST` | — | `10.116.2.145` (your IP) |
    | `YM_HARNESS_DEFAULT_MODEL` | `deepseek-r1:32b` (default) | any model Yardmaster can route — fallback for `[harness].default_model` |
    | `OPENROUTER_API_KEY` | your key | — |
+   | `YM_GB10_API_KEY` | the `VLLM_API_KEY` set on `gb10_b` | — |
    | `YM_AUTH_USER` / `YM_AUTH_PASS` | *(optional)* leave unset to use the browser setup page | — |
 
 3. **Deploy.** The first build compiles the Go workers + bundles the Console
@@ -244,7 +253,11 @@ Then open **`http://127.0.0.1:8770`** in a browser, log in, and check:
   Enable/Disable and Set default write to `[harness.overrides]` in
   `yardmaster.toml` and apply immediately (they're operator edits); "Apply
   all" approves held changes the pipeline couldn't auto-apply on its own
-  (§7 above has the underlying `GET/POST /v1/capabilities*` detail).
+  (§7 above has the underlying `GET/POST /v1/capabilities*` detail). Flip
+  **Require approval for new models** on to curate instead of auto-include —
+  a discovered model only goes live once you click **Approve** on it; click
+  **Approve all currently live** right after turning this on so your
+  existing model list doesn't get held pending while you catch up.
 - **Agent** — the Harness embedded in an iframe (tokened URL, host-rewritten to
   match how you reached the Console). It is **also** at
   `http://<host>:3080` directly for a full-window session; both prompt for the
@@ -290,9 +303,10 @@ curl http://<framework-ip>:11435/api/chat -d '{
   "messages": [{"role": "user", "content": "hello"}], "stream": false }'
 ```
 
-A model id that matches no `[targets.*]` follows `[routes.default]`. Add
-`-D-` to any request to see the `x-yardmaster-target` / `-provider` /
-`-locality` decision headers. Per-request rows land in the Console **Metrics**
+A model id that matches no `[targets.*]` follows `[routes.default]`. A model id
+declared on several targets (e.g. on both GB10s) fails over between them in
+declaration order. Add `-D-` to any request to see the `x-yardmaster-target` /
+`-provider` / `-locality` / `-nodes` / `-failover` decision headers. Per-request rows land in the Console **Metrics**
 tab.
 
 Pull local models with `docker exec yardmaster-ollama ollama pull <name>` (use
@@ -486,6 +500,7 @@ Set on the `ollama` service (defaults in the stack are sane):
 | `GET /v1/capabilities` shows a model stuck `pending_ops` and never applied | destructive changes (a removal not caused by an operator override, or a default change not caused by explicit `[harness]`/`[routes.default]` config) are held for approval by design (ADR-0028, additive-only auto-apply). Review the op, then `POST /v1/capabilities/apply` (or fix `yardmaster.toml` so the change becomes operator-driven and reconcile again). |
 | router: `model "X" matches no target and there is no [routes.default]` | add a `[targets.*]` with `id = "X"`, or a `[routes.default]` — then Save in the Console (the router hot-reloads). |
 | router: `provider "openrouter": OPENROUTER_API_KEY is not set` | set `OPENROUTER_API_KEY` in the stack env and redeploy. |
+| router: `provider "gb10_b_vllm": YM_GB10_API_KEY is not set`, or HTTP 401 from `gb10_b` | set `YM_GB10_API_KEY` in the stack env to the box's `VLLM_API_KEY` and redeploy. |
 | router: `all upstreams failed` for a LAN vLLM model | check the `base_url` in `yardmaster.toml` and that `curl <base_url>/models` works from the `yardmaster` container. |
 | `curl :11435/healthz` shows `mode: proxy` (not `router`) | `YM_DATAPLANE_MODE` isn't `router` — set it in the stack env and redeploy. |
 | Metrics tab still empty | the router writes a row per request — send one; confirm `YM_METRICS_DB` points into `/data` and the volume is writable. |

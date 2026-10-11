@@ -7,12 +7,13 @@
 #   - bind-mount it read-only at /config/yardmaster.toml on the `yardmaster`
 #     service (uncomment the mount in the stack).
 #
-# Local + LAN engines need no API key. OpenRouter is the only keyed provider;
-# its key comes from the OPENROUTER_API_KEY environment variable (passed into the
-# `yardmaster` service by the stack) and is NEVER written to this file.
+# Local Ollama and gb10_a need no API key. gb10_b (vLLM started with
+# --api-key) and OpenRouter are keyed; their keys come from the
+# YM_GB10_API_KEY and OPENROUTER_API_KEY environment variables (passed into the
+# `yardmaster` service by the stack) and are NEVER written to this file.
 #
-# Routing stays local by default: `[routes.default]` sends everything to the
-# local engine. The OpenRouter models are reached only when a request names one
+# Routing stays on the LAN by default: `[routes.default]` sends unnamed
+# requests to the GB10s. The OpenRouter models are reached only when a request names one
 # of their slugs (zero-config pass-through by model name).
 
 schema_version = 1
@@ -40,11 +41,31 @@ prometheus = true
 
 [targets]
 
+# ------------------------------------------------------------------- hardware
+# ADR-0029. Where engines physically run. Optional and informational, except
+# that it powers placement in /v1/capabilities, the Console's Capabilities
+# tab, and the x-yardmaster-nodes response header. `fabric` names a dedicated
+# interconnect between nodes (informational unless an engine spans them).
+[nodes.strix]
+accelerator = "strix_halo"   # Radeon 8060S, ROCm; also the desktop (Claude Desktop etc.)
+memory_gb = 128
+
+[nodes.gb10_a]
+accelerator = "gb10"
+memory_gb = 128
+fabric = "qsfp"              # direct QSFP link to gb10_b
+
+[nodes.gb10_b]
+accelerator = "gb10"
+memory_gb = 128
+fabric = "qsfp"
+
 # ------------------------------------------------------------------ local Ollama
 # The engine itself (127.0.0.1:11434 in the shared namespace), not the :11435 proxy.
 [providers.local_ollama]
 kind = "openai_compatible"
 base_url = "http://127.0.0.1:11434"
+nodes = ["strix"]
 
 [targets.local_llama32]
 id = "llama3.2:latest"
@@ -56,24 +77,50 @@ id = "deepseek-r1:32b"
 locality = "lan"
 provider = "local_ollama"
 
-# --------------------------------------------------------------- LAN vLLM nodes
+# ------------------------------------------------------------- GB10 vLLM nodes
 # Private-range hosts, plain http, no key. Adjust addresses / model ids to match
 # `curl http://<host>:<port>/v1/models` on each box.
-[providers.lan_vllm_utility]
-kind = "openai_compatible"
-base_url = "http://10.116.2.56:8002/v1"
-[targets.lan_gemma_utility]
-id = "gemma-4-12b-utility"
-locality = "lan"
-provider = "lan_vllm_utility"
-
-[providers.lan_vllm_big]
+#
+# Each GB10 runs its own models; nothing is sharded across the QSFP link.
+#
+# gb10_b (susa) is dedicated to qwen3.8-flash-next, which owns its whole memory
+# pool. gb10_a (asus) runs the general and utility models, one vLLM server per
+# model on its own port.
+[providers.gb10_b_vllm]
 kind = "openai_compatible"
 base_url = "http://10.116.2.120:8000/v1"
-[targets.lan_qwen_a3b]
+api_key_env = "YM_GB10_API_KEY"   # same value as VLLM_API_KEY on susa; delete if it has none
+nodes = ["gb10_b"]
+
+[providers.gb10_a_vllm]
+kind = "openai_compatible"
+base_url = "http://10.116.2.56:8000/v1"
+nodes = ["gb10_a"]
+
+[providers.gb10_a_utility]
+kind = "openai_compatible"
+base_url = "http://10.116.2.56:8002/v1"
+nodes = ["gb10_a"]
+
+[targets.gb10_b_flash_next]
+id = "qwen3.8-flash-next"
+locality = "lan"
+provider = "gb10_b_vllm"
+
+[targets.gb10_a_qwen_a3b]
 id = "qwen3.6-35b-a3b"
 locality = "lan"
-provider = "lan_vllm_big"
+provider = "gb10_a_vllm"
+
+[targets.gb10_a_gemma_utility]
+id = "gemma-4-12b-utility"
+locality = "lan"
+provider = "gb10_a_utility"
+
+# No model is on both GB10s, so there are no replicas. Declaring the same id on
+# a second target would make it one (ADR-0029): requests go to the first one
+# declared and fail over to the next if it is down, busy (429/503) or errors.
+# To span one engine across both boxes, give a provider nodes = ["gb10_a", "gb10_b"].
 
 # ------------------------------------------------------------------- OpenRouter
 # Cloud fallback. Keyed via env (OPENROUTER_API_KEY). Reached only when a request
@@ -113,25 +160,25 @@ locality = "remote"
 provider = "openrouter"
 
 # ----------------------------------------------------------------------- routes
+# Unnamed requests ("model": "auto") go to susa, then asus if susa is down or
+# busy. Both hops stay on the LAN.
 [routes.default]
 id = "auto"
-type = "passthrough"
-target = "local_r1_32b"
+type = "escalation"
+weak_target = "gb10_b_flash_next"
+strong_target = "gb10_a_qwen_a3b"
 
-# Optional: local -> cloud escalation instead of pass-through. Swap the default
-# route's type to "escalation" and set the targets:
-# [routes.default]
-# id = "auto"
-# type = "escalation"
-# weak_target = "local_llama32"
-# strong_target = "or_claude_sonnet5"
+# Cloud escalation instead is explicit: set strong_target to a remote target,
+# e.g. "or_claude_sonnet5". It is then the only way an unnamed request leaves
+# the LAN.
 
 # --------------------------------------------------------------- DeepSeek Harness
 # The Harness's model list is discovered automatically from the [targets.*]
 # above (ADR-0028) — nothing required here. [harness] only lets you steer it:
 #
-# [harness]
-# default_model = "local_r1_32b"        # else falls back to [routes.default].target
+[harness]
+default_model = "qwen3.8-flash-next"    # a model id, not a target name: agent turns
+                                        # go to susa, not the desktop iGPU
 #
 # [harness.policy]
 # deny_glob = ["*:free", "*-preview*"]  # never offer these ids to the agent
@@ -142,9 +189,28 @@ target = "local_r1_32b"
 #                                        # listing check — costs real money on paid
 #                                        # providers, so it's off unless you turn it on.
 # smoke_test_interval_s = 3600          # re-test at most this often per model
+# require_approval = false              # opt-in (ADR-0028 P4): curate instead of
+#                                        # auto-include — a model only ever goes live
+#                                        # (dsh, and the router's own /v1/models) once
+#                                        # you Approve it in the Console's Capabilities
+#                                        # tab (or set overrides."<id>".approved = true
+#                                        # here by hand). Off by default: newly
+#                                        # discovered/validated models are included
+#                                        # automatically, the pre-P4 behavior. Turning
+#                                        # this on does NOT immediately pull your
+#                                        # current model list out from under dsh — an
+#                                        # un-opined-on id just holds its removal
+#                                        # pending, same as any other destructive
+#                                        # change — but click "Approve all currently
+#                                        # live" once in the Console right after
+#                                        # flipping this on to clear that queue in one
+#                                        # step instead of approving each by hand.
 #
 # [harness.overrides."qwen/qwen3.8-flash"]
 # enabled = true                        # wins over policy.deny_glob for this id
 # rank = 1                              # more preferred than the locality default
 # default = false                       # set true to force it as the default model
+# approved = true                       # only needed if [harness.policy] require_approval
+#                                        # is on; true admits it, false rejects it,
+#                                        # absent leaves it "pending" (never rendered)
 

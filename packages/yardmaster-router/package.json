@@ -1,6 +1,6 @@
 {
   "name": "@pakgrou-porg/yardmaster-router",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Interim config-driven inference router for Yardmaster: routes OpenAI/Ollama chat requests to local / LAN / OpenRouter backends by model id, with passthrough + escalation routes and metrics. Placeholder for the Rust data plane (repo issue #36).",
   "license": "Apache-2.0",
   "author": "Karl Miller",

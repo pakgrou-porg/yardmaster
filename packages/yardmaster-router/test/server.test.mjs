@@ -260,6 +260,78 @@ target = "big"
   assert.match(patch, /model: "deepseek-r1:32b"/);
 });
 
+test("router: require_approval (ADR-0028 P4) holds a model out of /v1/models until an approved override lands, then reconcile brings it in", async (t) => {
+  const engine = startStub(19605, "llama3.2:latest,deepseek-r1:32b", "engine-approval");
+  const dir = mkdtempSync(join(tmpdir(), "ymr-approval-"));
+  const cfgPath = join(dir, "yardmaster.toml");
+  const dshHome = join(dir, "dshhome");
+  mkdirSync(join(dshHome, "profiles/web"), { recursive: true });
+  const baseCfg = `schema_version = 1
+[providers.local]
+kind = "openai_compatible"
+base_url = "http://127.0.0.1:19605"
+[targets]
+[targets.small]
+id = "llama3.2:latest"
+locality = "lan"
+provider = "local"
+[targets.big]
+id = "deepseek-r1:32b"
+locality = "lan"
+provider = "local"
+[routes.default]
+id = "auto"
+type = "passthrough"
+target = "big"
+[harness.policy]
+require_approval = true
+`;
+  writeFileSync(cfgPath, baseCfg);
+  const srv = spawn(process.execPath, [fileURLToPath(new URL("../src/server.mjs", import.meta.url))], {
+    env: {
+      ...process.env,
+      YM_ROUTER_PORT: "19604",
+      YM_ROUTER_CONFIG: cfgPath,
+      YM_METRICS_DB: join(dir, "m.db"),
+      YM_HARNESS_DSH_HOME: dshHome,
+      YM_CAPABILITIES_RECONCILE_S: "3600",
+    },
+    stdio: "ignore",
+  });
+  t.after(() => {
+    engine.kill();
+    srv.kill();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  await wait(1500);
+
+  const before = await (await fetch("http://127.0.0.1:19604/v1/models")).json();
+  assert.deepEqual(before.data, [], "require_approval on, nothing ever approved -> nothing rendered");
+  const capsBefore = await (await fetch("http://127.0.0.1:19604/v1/capabilities")).json();
+  assert.equal(capsBefore.require_approval, true);
+  const pendingRec = capsBefore.records.find((r) => r.id === "deepseek-r1:32b");
+  assert.equal(pendingRec.approval, "pending");
+
+  // The Console's Approve button writes exactly this: an `approved = true`
+  // override, same file, same shape upsertHarnessOverride produces. The
+  // router notices the mtime change on its own polling loop (every 3s) and
+  // reconciles from there — POSTing /v1/capabilities/reconcile directly
+  // would just re-run against the config already in memory, which is stale
+  // until that poll happens, so wait for the real hot-reload path instead.
+  writeFileSync(
+    cfgPath,
+    baseCfg + `[harness.overrides."deepseek-r1:32b"]\napproved = true\n`,
+  );
+  await wait(3800);
+
+  const after = await (await fetch("http://127.0.0.1:19604/v1/models")).json();
+  assert.deepEqual(after.data.map((m) => m.id), ["deepseek-r1:32b"], "the approved id is now live; the never-opined one stays out");
+
+  const patch = readFileSync(join(dshHome, "profiles/web/cordis.patch.yml"), "utf8");
+  assert.match(patch, /id: "deepseek-r1:32b"/);
+  assert.doesNotMatch(patch, /id: "llama3\.2:latest"/, "never approved -> never written to dsh's config either");
+});
+
 test("router: /v1/models and /api/tags project the capability registry's applied set (ADR-0028 P3)", async (t) => {
   // The stub only advertises two of these three declared ids — the third
   // stays "unreachable" and must not appear, unlike the old behavior (every

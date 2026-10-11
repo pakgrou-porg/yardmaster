@@ -37,6 +37,8 @@
 #                                                    and nothing works until you set one
 #   YM_AUTH_DISABLED 1                               turn auth OFF (loopback-dev only)
 #   OPENROUTER_API_KEY                               used by the OpenRouter targets in yardmaster.toml
+#   YM_GB10_API_KEY                                  Bearer key for a GB10 vLLM started with --api-key
+#                                                    (api_key_env in yardmaster.toml)
 #
 # AUTH IS ON BY DEFAULT. One admin credential (scrypt hash on the data volume,
 # survives restarts) protects BOTH the Console and the Harness. Do the first-run
@@ -124,6 +126,7 @@ services:
       YM_AUTH_DISABLED: "${YM_AUTH_DISABLED:-}"
       # Provider keys for yardmaster.toml (never written to the file).
       OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
+      YM_GB10_API_KEY: "${YM_GB10_API_KEY:-}"
     volumes:
       - yardmaster-data:/data
       - yardmaster-harness:/dshhome                 # rw: writes the Harness's model list (ADR-0028)
